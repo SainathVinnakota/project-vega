@@ -1,14 +1,26 @@
+"""
+Coaction Agent Platform — FastAPI Entry Point.
+Registers all routers, middleware, and initializes the agent registry on startup.
+"""
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.routes import router, set_dependencies
-from app.api.sessions import router as session_router, set_session_manager
-from app.api.auth import router as auth_router
+
 from app.core.logger import setup_logging, get_logger
-from app.services.session_manager import SessionManager
-from app.core.config import get_settings
 from app.db.database import engine
 from app.db.models import Base
+
+# Routers
+from app.routers.invoke import router as invoke_router
+from app.routers.sessions import router as session_router
+from app.routers.feedback import router as feedback_router
+from app.routers.health import router as health_router
+from app.routers.auth import router as auth_router
+
+# Middleware
+from app.middleware.correlation import CorrelationIdMiddleware
+from app.middleware.telemetry import TelemetryMiddleware
+from app.middleware.errors import ErrorHandlingMiddleware
 
 logger = get_logger(__name__)
 
@@ -16,36 +28,46 @@ logger = get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
-    logger.info("startup", service="bedrock-kb-rag")
+    logger.info("startup", service="coaction-agent-platform")
 
-    settings = get_settings()
-    session_manager = SessionManager()
-    
-    # Automatically create tables if they do not exist
+    # Create DB tables
     Base.metadata.create_all(bind=engine)
-    
-    # Initialize Bedrock KB agent
-    logger.info("initializing_bedrock_kb_agent", kb_id=settings.bedrock_kb_id)
-    from app.services.bedrock_kb_agent import BedrockKBAgent
-    conversational_agent = BedrockKBAgent(
-        session_manager=session_manager
-    )
 
-    set_session_manager(session_manager)
-    set_dependencies(session_manager, conversational_agent)
+    # Initialize agent registry (triggers agent creation)
+    from app.dependencies.services import get_agent_registry
+    registry = get_agent_registry()
+    agents = registry.list_agents()
+    logger.info("agents_registered", count=len(agents), agents=[a["agent_id"] for a in agents])
 
-    logger.info("ready", agent_type="bedrock_kb")
+    # Log per-agent memory status
+    for agent_info in agents:
+        aid = agent_info["agent_id"]
+        profile = registry.get_profile(aid)
+        mp = profile.memory_profile
+        if mp.enabled and mp.memory_id:
+            logger.info("agent_memory_ready", agent_id=aid, memory_id=mp.memory_id)
+        elif mp.enabled and not mp.memory_id:
+            logger.warning("agent_memory_no_id", agent_id=aid,
+                           msg="memory enabled but AGENTCORE_MEMORY_ID not set")
+        else:
+            logger.info("agent_memory_disabled", agent_id=aid)
+
+    logger.info("ready", platform_version="1.0.0")
     yield
-
-    logger.info("shutdown", service="bedrock-kb-rag")
+    logger.info("shutdown", service="coaction-agent-platform")
 
 
 app = FastAPI(
-    title="RAG Pipeline API",
+    title="Coaction Agent Platform",
+    description="Standard agent runtime — Project Vega architecture",
     version="1.0.0",
     lifespan=lifespan,
 )
 
+# ── Middleware (outermost first) ──
+app.add_middleware(ErrorHandlingMiddleware)
+app.add_middleware(TelemetryMiddleware)
+app.add_middleware(CorrelationIdMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -53,11 +75,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(router, prefix="/api/v1", tags=["RAG"])
-app.include_router(session_router, prefix="/api/v1/session", tags=["Sessions"])
-app.include_router(auth_router, prefix="/api/v1/auth", tags=["Auth"])
-
-
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
+# ── Routers ──
+app.include_router(invoke_router)
+app.include_router(session_router)
+app.include_router(feedback_router)
+app.include_router(health_router)
+app.include_router(auth_router)

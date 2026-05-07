@@ -1,307 +1,259 @@
-# Coaction Underwriting Assistant
+# Coaction Agent Platform
 
-An AI-powered underwriting assistant that helps Coaction Specialty underwriters search General Liability and Property manuals using natural language. Built on AWS Bedrock Knowledge Base with Aurora PostgreSQL (PGVector) for hybrid search.
+Enterprise backend platform to create, manage, and run multiple AI agents using one reusable runtime foundation.
 
-## Architecture
+---
 
+## 1) Executive Overview
+
+This repository is designed as a platform, not a single bot application.
+
+- **Control plane** manages agent definitions (what each agent is allowed to do).
+- **Runtime plane** executes agent requests through a standard pipeline (auth, guardrails, memory, retrieval, response, telemetry).
+- **Agent teams only configure agent behavior** (prompt, KBs, memory, model, policies) instead of rewriting Bedrock/Memory integration for every agent.
+
+Business outcome: faster onboarding of new agents with lower implementation risk and better consistency.
+
+---
+
+## 2) What This Platform Provides
+
+- Standard FastAPI runtime APIs for invoking agents
+- Reusable orchestration layer for all agents
+- AgentCore Memory integration for persistent memory
+- Bedrock Knowledge Base retrieval support
+- Role-based authorization and guardrail hooks
+- CloudWatch telemetry and metadata-only audit pattern
+- Agent templates (`retrieval_agent`, `readonly_tool_agent`) for quick onboarding
+
+---
+
+## 3) Architecture (Control Plane + Runtime Plane)
+
+### Control plane (configuration and registration)
+- `control_plane/agent_registry.py`
+- `control_plane/prompt_repository.py`
+- `domain/execution_profile.py`
+- `agents/templates.py`
+
+Responsibility: define each agent's runtime contract (model, KB IDs, memory ID, guardrails, tools, version).
+
+### Runtime plane (execution engine)
+- `runtime/orchestrator.py`
+- `runtime/base_agent.py`
+- `runtime/strands_agent.py`
+- `services/*` (memory, retrieval, guardrails, telemetry, authorization, audit)
+- `app/routers/*` (invoke, sessions, feedback, health)
+
+Responsibility: run every request in a consistent, governed flow.
+
+---
+
+## 4) Runtime Request Flow
+
+1. API receives request for `agent_id`
+2. Platform loads registered agent + `ExecutionProfile`
+3. Authorization and guardrails are applied
+4. Memory context is read (if enabled for that agent)
+5. Retrieval is executed using configured KB IDs
+6. Model generates response
+7. Output guardrails are applied
+8. Memory event is written (if enabled)
+9. Telemetry and audit metadata are emitted
+
+---
+
+## 5) Repository Structure
+
+```text
+app/                    FastAPI shell (routers, middleware, dependencies)
+agents/                 Reusable agent templates
+control_plane/          Agent registry and prompt management
+domain/                 Shared contracts (invocation, identity, execution profile)
+runtime/                Base agent + orchestrator
+services/               Shared integrations (memory, retrieval, auth, etc.)
+adapters/aws/           AWS client factory and adapters
+entrypoints/            AgentCore runtime entrypoints
+query.py                CLI test utility
+Dockerfile              Container build for runtime deployment
 ```
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────────────────┐
-│  Gradio UI      │────▶│  FastAPI Backend  │────▶│  OpenAI GPT-4o (LLM)   │
-│  localhost:7860  │     │  localhost:8000   │     │  + Strands Agent        │
-└─────────────────┘     └──────────────────┘     └───────────┬─────────────┘
-                                                             │
-                                                    search_manuals() tool
-                                                             │
-                                                             ▼
-                                                ┌─────────────────────────┐
-                                                │  AWS Bedrock KB         │
-                                                │  (Retrieve API)         │
-                                                │  ┌───────────────────┐  │
-                                                │  │ Aurora PostgreSQL │  │
-                                                │  │ + PGVector        │  │
-                                                │  │ (HNSW + GIN)     │  │
-                                                │  └───────────────────┘  │
-                                                └─────────────────────────┘
-```
 
-**How it works:**
-1. User asks a question in the Gradio UI
-2. FastAPI streams the request to the Strands Agent (OpenAI GPT-4o)
-3. The agent calls `search_manuals()` — a tool that hits the AWS Bedrock Retrieve API
-4. Bedrock performs hybrid search (vector + keyword) against Aurora PGVector
-5. The agent synthesizes a cited answer from the retrieved manual chunks
-6. Response streams back to the UI with status updates, follow-up suggestions, and source links
+---
 
-## Project Structure
+## 6) Configuration Model
 
-```
-coactionbot/
-├── app/                          # Backend application
-│   ├── __init__.py
-│   ├── main.py                   # FastAPI app + lifespan (entrypoint)
-│   ├── bedrock_kb_agent.py       # Strands Agent with search_manuals tool
-│   ├── config.py                 # Pydantic settings (reads .env)
-│   ├── models.py                 # Request/response schemas
-│   ├── session_manager.py        # In-memory session + TTL cleanup
-│   ├── logger.py                 # Structured logging (structlog)
-│   ├── add_index.py              # One-time script: GIN + HNSW indexes
-│   ├── api/
-│   │   ├── __init__.py
-│   │   ├── routes.py             # POST /query (SSE streaming)
-│   │   └── sessions.py           # Session CRUD endpoints
-│   └── crawlers/
-│       └── coaction_crawler.py   # Website scraper (Firecrawl/crawl4ai)
-│
-├── ui/
-│   ├── gradio_app.py             # Gradio 6 chat UI (current)
-│   ├── app.py                    # Streamlit UI (legacy, not maintained)
-│   ├── Dockerfile.gradio         # Docker image for Gradio UI
-│   └── Dockerfile                # Docker image for Streamlit UI (legacy)
-│
-├── agentcore_runtime/
-│   ├── agentcore_entrypoint.py   # AWS Bedrock AgentCore entry point
-│   └── requirements.txt          # AgentCore-specific dependencies
-│
-├── .env                          # Environment variables (DO NOT COMMIT)
-├── .gitignore
-├── .dockerignore
-├── Dockerfile                    # Docker image for FastAPI backend
-├── docker-compose.yml            # Run API + UI together
-├── requirements.txt              # Python dependencies
-├── query.py                      # CLI tool to test queries
-├── scrape.py                     # CLI tool to crawl + upload to S3
-├── global-bundle.pem             # AWS RDS SSL certificate bundle
-└── README.md
-```
+### Platform-level environment values (shared infra defaults)
+Examples:
+- `AWS_REGION`
+- AWS credentials
+- logging and app runtime settings
 
-## Prerequisites
+### Agent-level values (must be per agent)
+Stored in each agent's `ExecutionProfile`:
+- `model_profile.model_id`
+- `retrieval_profile.knowledge_base_ids` (one or many)
+- `memory_profile.memory_id`
+- `guardrail_profile.guardrail_id`
 
-- **Python 3.11+**
-- **AWS Account** with:
-  - Bedrock Knowledge Base configured with Aurora PostgreSQL
-  - S3 bucket with ingested manual documents
-  - IAM credentials with `bedrock:Retrieve` permission
-- **OpenAI API Key** (GPT-4o or GPT-4o-mini)
+Important: for multi-agent scale, avoid one global `BEDROCK_KB_ID` or one global `AGENTCORE_MEMORY_ID` for all agents.
 
-## Quick Start (First Run)
+---
 
-### 1. Clone and install dependencies
+## 7) Memory and Session Persistence
 
-```bash
-git clone <repository-url>
-cd coactionbot
+- Persistent agent memory is handled by **AgentCore Memory** through `services/memory.py`.
+- Session metadata API in `services/session_manager.py` is currently **in-memory fallback**.
+- The current implementation does **not** persist session history in DynamoDB.
 
-# Create virtual environment
-python -m venv .venv
+If DynamoDB persistence is required, implement a DynamoDB-backed session repository and wire it through dependency injection.
 
-# Activate (Windows PowerShell)
-.\.venv\Scripts\Activate.ps1
+---
 
-# Activate (macOS/Linux)
-source .venv/bin/activate
+## 8) APIs
 
-# Install dependencies
+- `POST /v1/agents/{agent_id}/invoke`
+- `GET /v1/agents`
+- `GET /v1/agents/{agent_id}`
+- `GET /v1/sessions/{session_id}`
+- `DELETE /v1/sessions/{session_id}`
+- `GET /health`
+
+---
+
+## 9) Local Development
+
+### Prerequisites
+- Python 3.11+
+- AWS credentials configured (if using AWS services)
+
+### Install
+```powershell
 pip install -r requirements.txt
 ```
 
-### 2. Configure environment variables
-
-Create a `.env` file in the project root:
-
-```env
-# AWS
-AWS_REGION=us-east-1
-AWS_ACCESS_KEY_ID=your-access-key
-AWS_SECRET_ACCESS_KEY=your-secret-key
-BEDROCK_KB_ID=your-knowledge-base-id
-
-# Aurora PostgreSQL (only needed if running add_index.py)
-DB_HOST=your-aurora-cluster.us-east-1.rds.amazonaws.com
-DB_NAME=coaction_kb
-DB_USER=coaction_admin
-DB_PASSWORD=your-password
-DB_PORT=5432
-
-# OpenAI
-OPENAI_API_KEY=sk-your-openai-key
-OPENAI_CHAT_MODEL=gpt-4o-mini
-
-# Crawler (optional)
-MAX_CRAWL_DEPTH=2
-MAX_PAGES_PER_CRAWL=500
-CRAWL_CONCURRENCY=5
-
-# Logging
-LOG_LEVEL=INFO
-```
-
-### 3. Start the FastAPI backend
-
-```bash
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-```
-
-You should see:
-```
-INFO:     Uvicorn running on http://0.0.0.0:8000
-{"event": "ready", "agent_type": "bedrock_kb"}
-```
-
-### 4. Start the Gradio UI
-
-In a **separate terminal** (with the same virtual environment activated):
-
-```bash
-python ui/gradio_app.py
-```
-
-Open your browser to **http://localhost:7860** and start chatting.
-
-### 5. (Optional) Test from the command line
-
-```bash
-python query.py "What is class code 10040?"
-```
-
-## Docker Deployment
-
-### Run with Docker Compose (recommended)
-
-```bash
-# Build and start both services
-docker compose up --build
-
-# Access:
-# - API:  http://localhost:8000
-# - UI:   http://localhost:7860
-```
-
-The `.env` file is automatically read by Docker Compose.
-
-### Run containers individually
-
-**API:**
-```bash
-docker build -t coactionbot-api .
-docker run -p 8000:8000 --env-file .env coactionbot-api
-```
-
-**UI:**
-```bash
-docker build -t coactionbot-ui -f ui/Dockerfile.gradio ui/
-docker run -p 7860:7860 -e API_BASE_URL=http://host.docker.internal:8000/api/v1 coactionbot-ui
-```
-
-## AWS Bedrock Knowledge Base Setup
-
-### Data Ingestion Pipeline
-
-1. **Crawl website content:**
-   ```bash
-   python scrape.py https://bindingauthority.coactionspecialty.com
-   ```
-   This crawls the site and uploads cleaned text to the S3 bucket.
-
-2. **Sync Knowledge Base:**
-   - Open the [AWS Bedrock Console](https://console.aws.amazon.com/bedrock)
-   - Navigate to **Knowledge Bases** → select your KB
-   - Click **Sync** on the data source
-
-3. **Verify:** Ask a question in the UI to confirm retrieval works.
-
-### Database Indexes (one-time setup)
-
-If setting up Aurora for the first time, run the index creation script:
-
-```bash
-python -c "from app.utils.add_index import *"
-```
-
-This creates the required GIN (full-text) and HNSW (vector similarity) indexes.
-
-## API Reference
-
-### Health Check
-```
-GET /health
-→ {"status": "ok"}
-```
-
-### Query (Streaming SSE)
-```
-POST /api/v1/query
-Content-Type: application/json
-
-{
-  "query": "What is class code 10040?",
-  "session_id": "optional-uuid",
-  "top_k": 5
-}
-
-→ Stream of Server-Sent Events:
-data: {"type": "status", "message": "🔍 Searching Coaction manuals..."}
-data: {"type": "final", "answer": "...", "sources": [...], "follow_up_questions": [...], "session_id": "..."}
-```
-
-### Sessions
-```
-POST /api/v1/session/create  → {"session_id": "uuid"}
-GET  /api/v1/session/{id}    → session details
-```
-
-## AgentCore Deployment (AWS Managed Runtime)
-
-For deploying as an AWS Bedrock AgentCore runtime:
-
+### Run API
 ```powershell
-# 1. Authenticate
-aws configure
-
-# 2. Configure AgentCore
-agentcore configure
-
-# 3. Deploy
-agentcore deploy --agent underwriting_agent `
-  --env BEDROCK_KB_ID=JATZNTWHAV `
-  --env AWS_REGION=us-east-1 `
-  --env OPENAI_CHAT_MODEL=gpt-4o `
-  --env OPENAI_API_KEY=your-key
-
-# 4. Test
-agentcore invoke "{\"prompt\":\"What is class code 10040?\"}"
+python -m uvicorn app.main:app --reload
 ```
 
-> **Important:** After deployment, add an inline IAM policy to the AgentCore runtime role granting `bedrock:Retrieve` and `bedrock:RetrieveAndGenerate` permissions. Without this, the deployed agent will return fallback answers.
+### Test invoke
+```powershell
+curl -X POST "http://localhost:8000/v1/agents/coaction_binding_authority_bot/invoke" `
+  -H "Content-Type: application/json" `
+  -d "{\"input_text\":\"What is class code 10040?\",\"user_id\":\"u1\",\"role\":\"underwriter\"}"
+```
 
-## Configuration Reference
+---
 
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `AWS_REGION` | Yes | `us-east-1` | AWS region |
-| `AWS_ACCESS_KEY_ID` | Yes | — | IAM access key |
-| `AWS_SECRET_ACCESS_KEY` | Yes | — | IAM secret key |
-| `BEDROCK_KB_ID` | Yes | — | Bedrock Knowledge Base ID |
-| `OPENAI_API_KEY` | Yes | — | OpenAI API key |
-| `OPENAI_CHAT_MODEL` | No | `gpt-4o` | OpenAI model to use |
-| `DB_HOST` | No | — | Aurora cluster endpoint |
-| `DB_NAME` | No | `postgres` | Database name |
-| `DB_USER` | No | `postgres` | Database user |
-| `DB_PASSWORD` | No | — | Database password |
-| `LOG_LEVEL` | No | `INFO` | Logging level |
+## 10) Deployment to Amazon Bedrock AgentCore Runtime
 
-## Troubleshooting
+This section is written as an operational runbook from zero to deployment.
 
-| Symptom | Cause | Fix |
-|---|---|---|
-| "Session not found" | Backend restarted | Sessions auto-create now; just retry |
-| Fallback answers after deploy | Missing IAM permissions | Add `bedrock:Retrieve` to runtime role |
-| No sources in response | KB not synced | Run Sync in Bedrock Console |
-| Import errors on startup | Stale `.pyc` cache | Delete `__pycache__/` dirs and restart |
-| "API Offline" in UI | Backend not running | Start FastAPI first, then Gradio |
+### Step 1: Prepare AWS resources
+Create/identify:
+- Bedrock model access
+- Bedrock Knowledge Base(s)
+- AgentCore Memory resource(s) (one per agent recommended)
+- Optional guardrails
+- IAM role/policies required for runtime access
 
-## Notes
+### Step 2: Configure environment
+Set runtime environment values for the target environment (dev/stage/prod), for example:
+- `AWS_REGION`
+- `MODEL_PROVIDER`
+- `BEDROCK_MODEL_ID` or OpenAI model settings
+- agent-specific memory and KB values (recommended through profile configuration)
 
-- `scrape.py` imports a legacy `bedrock_kb_indexer` module — update the import if you need to re-crawl
-- `ui/app.py` (Streamlit) is kept for reference but is **not maintained**
-- The `global-bundle.pem` file is the AWS RDS SSL certificate bundle for secure Aurora connections
-- `app/add_index.py` is a one-time database setup script and can be archived after initial configuration
+### Step 3: Select runtime entrypoint
+Choose the entrypoint to deploy:
+- `entrypoints/underwriting_agent.py`
+- `entrypoints/claims_agent.py`
+
+Update `Dockerfile` `CMD` if deploying a different entrypoint.
+
+### Step 4: Build and validate container locally
+```powershell
+docker build -t coaction-agent-platform:latest .
+docker run --rm -p 8080:8080 --env-file .env coaction-agent-platform:latest
+```
+
+### Step 5: Deploy with AgentCore CLI
+Use your AgentCore deployment configuration and run:
+```powershell
+agentcore deploy
+```
+
+Notes:
+- Use container deployment mode for Windows environments.
+- Ensure your deployment manifest references the correct runtime entrypoint/container settings.
+- Validate logs in CloudWatch after deployment.
+
+### Step 6: Post-deployment validation
+- Invoke deployed endpoint with a test prompt
+- Verify retrieval citations and memory behavior
+- Confirm telemetry/audit events
+- Validate role-based behavior and guardrails
+
+---
+
+## 11) How to Create a New Agent (Non-Technical + Technical)
+
+### Plain-English view
+To create a new agent, you provide four things:
+1. Agent name and purpose
+2. Prompt template (how the agent should behave)
+3. Data sources (which KB IDs it can read)
+4. Memory and policy settings (which memory ID, guardrails, tools)
+
+The platform then runs this agent using the same shared backend services.
+
+### Technical checklist
+1. Add prompt template in `control_plane/prompt_repository.py`.
+2. Create/register agent instance in `app/dependencies/services.py` (use `RetrievalAgent` or `ReadOnlyToolAgent`).
+3. Define `ExecutionProfile` for that `agent_id` with:
+   - model profile
+   - retrieval KB IDs
+   - memory ID
+   - guardrails and observability
+4. Register using `registry.register(agent, profile)`.
+5. Start app and validate:
+   - `GET /v1/agents`
+   - `GET /v1/agents/{agent_id}`
+   - invoke endpoint test
+6. If deploying separately, ensure corresponding entrypoint under `entrypoints/` and Docker `CMD` are aligned.
+
+### Minimal example (registration pattern)
+```python
+claims_bot = RetrievalAgent(
+    agent_id="claims_assistant_bot",
+    prompt_template_id="claims_assistant_v1",
+)
+
+claims_profile = ExecutionProfile(
+    agent_id="claims_assistant_bot",
+    version="v1",
+    prompt_template_id="claims_assistant_v1",
+    model_profile=ModelProfile(model_id="anthropic.claude-3-5-sonnet-20241022-v2:0"),
+    retrieval_profile=RetrievalProfile(knowledge_base_ids=["kb-claims-primary"]),
+    memory_profile=MemoryProfile(enabled=True, memory_id="mem-claims-prod"),
+    guardrail_profile=GuardrailProfile(guardrail_id="gr-claims", guardrail_version="1"),
+    observability_profile=ObservabilityProfile(),
+)
+
+registry.register(claims_bot, claims_profile)
+```
+
+---
+
+## 12) Governance and Security Notes
+
+- Authentication is expected upstream (API Gateway/authorizer pattern).
+- Runtime uses identity context (`user_id`, `roles`, `channel`, `correlation_id`).
+- First-release tool scope is intended to be read-only.
+- Raw prompt/response logging should remain disabled by policy unless explicitly approved.
+
+---
+
+## 13) Recommended Next Improvement
+
+Externalize agent profiles from code to a control-plane data store (JSON/YAML/DB/Parameter Store), so new agents can be onboarded with configuration only and no code change in `app/dependencies/services.py`.

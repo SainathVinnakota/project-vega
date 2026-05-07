@@ -1,23 +1,25 @@
-FROM python:3.11-slim
+FROM public.ecr.aws/docker/library/python:3.11-slim
 
-# Install system deps for Playwright
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
-    curl wget gnupg ca-certificates \
-    libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
-    libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 \
-    libxfixes3 libxrandr2 libgbm1 libasound2 \
+    libpq-dev \
+    gcc \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
+# Copy requirements and install
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt \
-    && crawl4ai-setup \
-    && playwright install chromium --with-deps
+RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app/ ./app/
-COPY .env* ./
+# Copy source code
+COPY . .
 
-EXPOSE 8000
+# Ensure entrypoint is executable
+RUN chmod +x entrypoints/underwriting_agent.py
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+# Expose port 8080 (AgentCore default)
+EXPOSE 8080
+
+# Command to run the agent
+CMD ["python", "entrypoints/underwriting_agent.py"]

@@ -1,7 +1,0 @@
-strands-agents>=1.0.0
-strands-agents-tools>=0.1.0
-bedrock-agentcore
-boto3>=1.34.0
-openai>=1.40.0
-pydantic-settings>=2.0.0
-python-dotenv

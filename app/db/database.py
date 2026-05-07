@@ -1,13 +1,11 @@
 import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from app.core.config import get_settings
+from app.dependencies.settings import get_settings
 
 settings = get_settings()
 
 sslmode = os.getenv("DB_SSL_MODE", "require")
-
-# Use a default string for local development if auth is bypassed, but strictly use settings generally
 DB_USER = settings.db_user or "postgres"
 DB_PASS = settings.db_password or ""
 DB_HOST = settings.db_host or "localhost"
@@ -23,6 +21,7 @@ if os.path.exists(sslrootcert):
 
 engine = create_engine(DB_URL, pool_pre_ping=True, connect_args=connect_args)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
 
 def get_db():
     db = SessionLocal()
