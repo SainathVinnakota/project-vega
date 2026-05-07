@@ -24,7 +24,6 @@ from app.middleware.errors import ErrorHandlingMiddleware
 
 logger = get_logger(__name__)
 
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
