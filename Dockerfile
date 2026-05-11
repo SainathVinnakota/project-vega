@@ -22,4 +22,4 @@ RUN chmod +x entrypoints/underwriting_agent.py
 EXPOSE 8080
 
 # Command to run the agent
-CMD ["python", "entrypoints/underwriting_agent.py"]
+CMD ["python", "entrypoints/platform_agent.py"]

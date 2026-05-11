@@ -145,13 +145,12 @@ def invoke(payload: dict) -> dict:
                 trace="enabled"
             )
 
-        # Create agent with native memory and guardrail integration
+        # Create agent with native memory integration
         agent = Agent(
             model=model,
             system_prompt=base_system_prompt,
             tools=[search_manuals],
             session_manager=session_manager,
-            guardrail_config=guardrail_config,
         )
 
         # Invoke agent with the original query

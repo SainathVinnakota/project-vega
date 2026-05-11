@@ -1,5 +1,6 @@
 # Virtual environments
 env/
+venv/
 ui/env/
 *.venv
 
@@ -13,6 +14,7 @@ __pycache__/
 .env.*
 .bedrock_agentcore.yaml
 .bedrock_agentcore/
+.agentcore.json
 
 # IDE/project files
 .idea/
@@ -28,3 +30,6 @@ Thumbs.db
 # Project Data
 data/
 scratch/
+
+# IAM / infra (account-specific)
+iam-policy-update.json

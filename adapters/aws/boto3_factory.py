@@ -26,14 +26,15 @@ class Boto3SessionFactory:
             connect_timeout=3,
             read_timeout=30,
         )
-        # Create a session with explicit credentials from settings
+        # Use explicit credentials when available (local dev),
+        # otherwise fall back to the default credential chain (IAM role in cloud)
         from app.dependencies.settings import get_settings
         settings = get_settings()
-        self._session = boto3.Session(
-            aws_access_key_id=settings.aws_access_key_id,
-            aws_secret_access_key=settings.aws_secret_access_key,
-            region_name=region_name,
-        )
+        session_kwargs = {"region_name": region_name}
+        if settings.aws_access_key_id and settings.aws_secret_access_key:
+            session_kwargs["aws_access_key_id"] = settings.aws_access_key_id
+            session_kwargs["aws_secret_access_key"] = settings.aws_secret_access_key
+        self._session = boto3.Session(**session_kwargs)
 
     def client(self, service_name: str):
         """Create a Boto3 client for the given AWS service."""

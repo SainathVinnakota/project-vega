@@ -204,7 +204,6 @@ class StrandsBaseAgent(BaseAgent):
                 system_prompt=prompt,
                 tools=[search_manuals],
                 session_manager=session_manager,
-                guardrail_config=guardrail_config,
             )
             logger.info("agent_created",
                         agent_id=self.agent_id,
