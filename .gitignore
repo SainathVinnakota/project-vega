@@ -33,3 +33,6 @@ scratch/
 
 # IAM / infra (account-specific)
 iam-policy-update.json
+
+# SSL Certificates
+global-bundle.pem

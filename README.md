@@ -1,259 +1,165 @@
-# Coaction Agent Platform
+# Coaction Agent Platform — Enterprise Multi-Agent Core
 
-Enterprise backend platform to create, manage, and run multiple AI agents using one reusable runtime foundation.
-
----
-
-## 1) Executive Overview
-
-This repository is designed as a platform, not a single bot application.
-
-- **Control plane** manages agent definitions (what each agent is allowed to do).
-- **Runtime plane** executes agent requests through a standard pipeline (auth, guardrails, memory, retrieval, response, telemetry).
-- **Agent teams only configure agent behavior** (prompt, KBs, memory, model, policies) instead of rewriting Bedrock/Memory integration for every agent.
-
-Business outcome: faster onboarding of new agents with lower implementation risk and better consistency.
+An enterprise-grade, high-performance serverless multi-agent architecture built on AWS native runtime infrastructure. The platform decouples **Agent Orchestration Logic** from standalone microservices, providing a single universal control and runtime environment where new agents are provisioned dynamically via **JSON Execution Profiles** with **Zero Container Pushes**.
 
 ---
 
-## 2) What This Platform Provides
+## 🏗️ 1. Master Systems Architecture
 
-- Standard FastAPI runtime APIs for invoking agents
-- Reusable orchestration layer for all agents
-- AgentCore Memory integration for persistent memory
-- Bedrock Knowledge Base retrieval support
-- Role-based authorization and guardrail hooks
-- CloudWatch telemetry and metadata-only audit pattern
-- Agent templates (`retrieval_agent`, `readonly_tool_agent`) for quick onboarding
-
----
-
-## 3) Architecture (Control Plane + Runtime Plane)
-
-### Control plane (configuration and registration)
-- `control_plane/agent_registry.py`
-- `control_plane/prompt_repository.py`
-- `domain/execution_profile.py`
-- `agents/templates.py`
-
-Responsibility: define each agent's runtime contract (model, KB IDs, memory ID, guardrails, tools, version).
-
-### Runtime plane (execution engine)
-- `runtime/orchestrator.py`
-- `runtime/base_agent.py`
-- `runtime/strands_agent.py`
-- `services/*` (memory, retrieval, guardrails, telemetry, authorization, audit)
-- `app/routers/*` (invoke, sessions, feedback, health)
-
-Responsibility: run every request in a consistent, governed flow.
-
----
-
-## 4) Runtime Request Flow
-
-1. API receives request for `agent_id`
-2. Platform loads registered agent + `ExecutionProfile`
-3. Authorization and guardrails are applied
-4. Memory context is read (if enabled for that agent)
-5. Retrieval is executed using configured KB IDs
-6. Model generates response
-7. Output guardrails are applied
-8. Memory event is written (if enabled)
-9. Telemetry and audit metadata are emitted
-
----
-
-## 5) Repository Structure
+The platform operates on a strictly bifurcated paradigm: **Control Plane** (Governance & Definitions) and **Runtime Plane** (Execution & Orchestration).
 
 ```text
-app/                    FastAPI shell (routers, middleware, dependencies)
-agents/                 Reusable agent templates
-control_plane/          Agent registry and prompt management
-domain/                 Shared contracts (invocation, identity, execution profile)
-runtime/                Base agent + orchestrator
-services/               Shared integrations (memory, retrieval, auth, etc.)
-adapters/aws/           AWS client factory and adapters
-entrypoints/            AgentCore runtime entrypoints
-query.py                CLI test utility
-Dockerfile              Container build for runtime deployment
+┌────────────────────────────────────────────────────────────────────────┐
+│                             CONTROL PLANE                              │
+│                                                                        │
+│  ┌───────────────────────┐   ┌──────────────────────────────────────┐  │
+│  │   JSON Agent Profiles │   │   PromptRepository (System Prompts)  │  │
+│  └───────────┬───────────┘   └──────────────────┬───────────────────┘  │
+└──────────────┼──────────────────────────────────┼──────────────────────┘
+               │ Dynamic Parsing                  │ Constructor Injection
+┌──────────────▼──────────────────────────────────▼──────────────────────┐
+│                             RUNTIME PLANE                              │
+│                                                                        │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │                     Universal RuntimeOrchestrator                │  │
+│  └─────┬──────────────────┬─────────────────────┬─────────────┬─────┘  │
+│        │                  │                     │             │        │
+│  ┌─────▼─────┐      ┌─────▼─────┐         ┌─────▼─────┐ ┌─────▼─────┐  │
+│  │ Pydantic  │      │  Bedrock  │         │ AgentCore │ │ CloudWatch│  │
+│  │ Guardrails│      │ Knowledge │         │ Persistent│ │ Observab. │  │
+│  │ Validation│      │ Base KBs  │         │ Memory LTM│ │ Telemetry │  │
+│  └───────────┘      └───────────┘         └───────────┘ └───────────┘  │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
----
-
-## 6) Configuration Model
-
-### Platform-level environment values (shared infra defaults)
-Examples:
-- `AWS_REGION`
-- AWS credentials
-- logging and app runtime settings
-
-### Agent-level values (must be per agent)
-Stored in each agent's `ExecutionProfile`:
-- `model_profile.model_id`
-- `retrieval_profile.knowledge_base_ids` (one or many)
-- `memory_profile.memory_id`
-- `guardrail_profile.guardrail_id`
-
-Important: for multi-agent scale, avoid one global `BEDROCK_KB_ID` or one global `AGENTCORE_MEMORY_ID` for all agents.
+### Core Design Principles
+1. **Decoupled Execution Paths**: Dual ingress patterns routing cleanly to the exact same shared orchestrator pipeline:
+   - **Pathway A (REST/FastAPI)**: Intended for headless portals, web UI frontends, and external client systems requiring JWT verification, header parsing, correlation tracking, and full REST wrappers.
+   - **Pathway B (Serverless MicroVM)**: Native lean Python event listeners deployed straight to AWS Bedrock AgentCore MicroVM clusters, eliminating Uvicorn layer overhead for step functions, event triggers, and internal automation.
+2. **Zero Code Onboarding**: To deploy a new agent, teams drop a clean JSON document into `profiles/<agent_id>.json` containing model parameters, specific KB bindings, memory IDs, and role restrictions. The platform dynamically auto-discovers and registers the execution contract on the fly.
+3. **Idempotent Deployments**: The cloud engine wrapper detects active runtime collision states (`ConflictException`), automatically pivoting from resource allocation to rolling configuration parameter synchronizations without service interruption.
 
 ---
 
-## 7) Memory and Session Persistence
+## 🔒 2. Enterprise Governance & Security Envelope
 
-- Persistent agent memory is handled by **AgentCore Memory** through `services/memory.py`.
-- Session metadata API in `services/session_manager.py` is currently **in-memory fallback**.
-- The current implementation does **not** persist session history in DynamoDB.
+To guarantee secure execution within strict corporate perimeters, the platform relies on granular cloud boundary constraints.
 
-If DynamoDB persistence is required, implement a DynamoDB-backed session repository and wire it through dependency injection.
+### The IAM Security Sandbox
+Every AgentCore MicroVM task container executes using an assigned IAM execution role (`VegaPlatformExecutionRole`). For end-to-end functionality, the trust policy and inline operational scopes must enforce minimal privilege rules:
 
----
+* **Trust Policy**: Authorizes both `bedrock.amazonaws.com` and local task workers to securely assume identity tokens.
+* **Bedrock Knowledge Base Access**: Explicit policies granting `bedrock:Retrieve` and `bedrock:RetrieveAndGenerate` against targeted KB Amazon Resource Names (ARNs).
+* **Model Inference Routing**: Grants `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` against configured local intra-region IDs (e.g., `amazon.nova-pro-v1:0` or `anthropic.claude-3-haiku-20240307-v1:0`) or regional Cross-Region Inference Profiles (`us.anthropic...`).
+* **Storage and Session Management**: Requires `s3:GetObject` and `s3:PutObject` for raw persistence buckets, alongside basic DB network credentials for internal indexing read targets.
 
-## 8) APIs
-
-- `POST /v1/agents/{agent_id}/invoke`
-- `GET /v1/agents`
-- `GET /v1/agents/{agent_id}`
-- `GET /v1/sessions/{session_id}`
-- `DELETE /v1/sessions/{session_id}`
-- `GET /health`
+### Service Control Policy (SCP) Compliance
+When targeting multi-tenant accounts, enterprise boundary layers frequently enforce explicit **SCP regional deny policies** blocking network access outside primary designated groups (e.g., restricted entirely to `us-east-1`). The runtime natively mitigates SCP triggers by utilizing authoritative local foundation model ID mappings, completely bypassing inter-region routing endpoints.
 
 ---
 
-## 9) Local Development
+## 🚀 3. Onboarding Lifecycle: The "Zero-Push" Pattern
 
-### Prerequisites
-- Python 3.11+
-- AWS credentials configured (if using AWS services)
+Gone are the days of rebuilding and publishing container base layers every time a new system prompt, retrieval filter, or model iteration is required.
 
-### Install
+### 1. Provisioning a New Agent
+To onboard a new business entity (e.g., a custom Underwriter Audit Bot):
+1. Create a simple JSON metadata block inside `profiles/underwriter_audit_bot.json`.
+2. Populate its specific configuration profile constraints:
+```json
+{
+  "agent_id": "underwriter_audit_bot",
+  "version": "1.0",
+  "orchestration_framework": "strands",
+  "prompt_template_id": "underwriter_audit_bot",
+  "model_profile": {
+    "provider": "bedrock",
+    "model_id": "amazon.nova-pro-v1:0",
+    "temperature": 0.0,
+    "max_tokens": 2048
+  },
+  "retrieval_profile": {
+    "provider": "bedrock_knowledge_base",
+    "enabled": true,
+    "knowledge_base_ids": ["KB99XAUT01"],
+    "reranking_enabled": true,
+    "citations_required": true
+  },
+  "memory_profile": {
+    "provider": "agentcore_memory",
+    "enabled": true,
+    "memory_id": "mem_audit_underwriter_prod",
+    "memory_scope": "agent_user",
+    "retention_days": 180,
+    "ltm_strategies": ["SEMANTIC", "SUMMARIZATION"]
+  },
+  "session_profile": {
+    "provider": "s3",
+    "bucket": "vega-binding-authority",
+    "prefix": "sessions/"
+  }
+}
+```
+3. Map the matching instruction block inside `control_plane/prompt_repository.py`.
+
+### 2. Live Cloud Hydration
+Trigger your single automated synchronization interface:
 ```powershell
-pip install -r requirements.txt
+python scripts/platform_bootstrap.py underwriter_audit_bot vega-binding-authority arn:aws:iam::513847850768:role/VegaPlatformExecutionRole
 ```
+**Outcome**: The script loads the targeted profile parameters, dynamically aggregates connection paths, queries live cloud resources, and performs a live rolling refresh of the active AWS container parameters. **The new agent is fully operational instantly.**
 
-### Run API
-```powershell
-python -m uvicorn app.main:app --reload
-```
+---
 
-### Test invoke
-```powershell
-curl -X POST "http://localhost:8000/v1/agents/coaction_binding_authority_bot/invoke" `
-  -H "Content-Type: application/json" `
-  -d "{\"input_text\":\"What is class code 10040?\",\"user_id\":\"u1\",\"role\":\"underwriter\"}"
+## 📋 4. Repository Code Map
+
+```text
+├── app/
+│   ├── core/           # Logging engines and context definitions
+│   ├── dependencies/   # DI container mappings, static fallbacks, environment config
+│   └── routers/        # External pathway REST execution routes (FastAPI)
+├── agents/             # Reusable Agent Core behavioral blocks
+├── control_plane/      # Enterprise AgentRegistry auto-loader and dynamic prompt database
+├── domain/             # Authoritative schema contracts (Pydantic validation layers)
+├── entrypoints/        # Specialized microVM serverless listener interfaces
+├── profiles/           # Definitive configuration JSON payloads for dynamic auto-discovery
+├── runtime/            # Shared Universal RuntimeOrchestrator and framework execution models
+├── scripts/            # Fully automated AWS resource bootstrap and cloud orchestration drivers
+└── services/           # Decoupled external adapter tools (retrieval, LTM memory persistence)
 ```
 
 ---
 
-## 10) Deployment to Amazon Bedrock AgentCore Runtime
+## 🛠️ 5. Operational Health & Telemetry
 
-This section is written as an operational runbook from zero to deployment.
+The platform mandates strict separation of runtime metrics from proprietary user datastreams.
+* **Metadata-Only Audit Logs**: Emits pure structural metadata (execution speed, retrieval duration, session ID strings, confidence intervals) straight to centralized CloudWatch log groups without persisting sensitive prompt content.
+* **Pydantic Validation Guardrails**: Validates input scopes, execution contexts, and egress objects at runtime to ensure zero unhandled container process exceptions.
 
-### Step 1: Prepare AWS resources
-Create/identify:
-- Bedrock model access
-- Bedrock Knowledge Base(s)
-- AgentCore Memory resource(s) (one per agent recommended)
-- Optional guardrails
-- IAM role/policies required for runtime access
+For comprehensive end-to-end setup rules, database migrations, security group assignments, and step-by-step infrastructure provisioning instructions, refer directly to the dedicated operations runbook:
+👉 **[Agent Platform Architecture & Operations Runbook](file:///c:/users/sainath.vinnakota/project-vega/agent_platform_runbook.md)**.
 
-### Step 2: Configure environment
-Set runtime environment values for the target environment (dev/stage/prod), for example:
-- `AWS_REGION`
-- `MODEL_PROVIDER`
-- `BEDROCK_MODEL_ID` or OpenAI model settings
-- agent-specific memory and KB values (recommended through profile configuration)
+---
 
-### Step 3: Select runtime entrypoint
-Choose the entrypoint to deploy:
-- `entrypoints/underwriting_agent.py`
-- `entrypoints/claims_agent.py`
+## ✅ 6. Local Pre-Push CI Verification Verifiers
 
-Update `Dockerfile` `CMD` if deploying a different entrypoint.
+To prevent breaking automated builds in remote GitHub Actions workflows (`.github/workflows/ci.yml`), developers must run code formatting, static lint analysis, and unit test suites locally before pushing commits.
 
-### Step 4: Build and validate container locally
+### Automated Cross-Platform Check Utility
+A pure Python verifier is available to automatically run **Ruff linting**, **Ruff layout formatting**, and the **Pytest regression framework** natively on Windows shells or Linux containers:
+
 ```powershell
-docker build -t coaction-agent-platform:latest .
-docker run --rm -p 8080:8080 --env-file .env coaction-agent-platform:latest
+# Run read-only conformance check
+python scripts/pre_push_check.py
+
+# Auto-fix lint infractions and format code layout in-place
+python scripts/pre_push_check.py --fix
 ```
 
-### Step 5: Deploy with AgentCore CLI
-Use your AgentCore deployment configuration and run:
-```powershell
-agentcore deploy
+### Direct Makefile Targets
+For standard bash shells or local dev systems with the `make` utility configured, trigger validation loops via explicit make targets:
+```bash
+make check    # Equivalent to check-only mode
+make fix      # Equivalent to auto-fix mode
+make test     # Standalone pytest suite runner
 ```
-
-Notes:
-- Use container deployment mode for Windows environments.
-- Ensure your deployment manifest references the correct runtime entrypoint/container settings.
-- Validate logs in CloudWatch after deployment.
-
-### Step 6: Post-deployment validation
-- Invoke deployed endpoint with a test prompt
-- Verify retrieval citations and memory behavior
-- Confirm telemetry/audit events
-- Validate role-based behavior and guardrails
-
----
-
-## 11) How to Create a New Agent (Non-Technical + Technical)
-
-### Plain-English view
-To create a new agent, you provide four things:
-1. Agent name and purpose
-2. Prompt template (how the agent should behave)
-3. Data sources (which KB IDs it can read)
-4. Memory and policy settings (which memory ID, guardrails, tools)
-
-The platform then runs this agent using the same shared backend services.
-
-### Technical checklist
-1. Add prompt template in `control_plane/prompt_repository.py`.
-2. Create/register agent instance in `app/dependencies/services.py` (use `RetrievalAgent` or `ReadOnlyToolAgent`).
-3. Define `ExecutionProfile` for that `agent_id` with:
-   - model profile
-   - retrieval KB IDs
-   - memory ID
-   - guardrails and observability
-4. Register using `registry.register(agent, profile)`.
-5. Start app and validate:
-   - `GET /v1/agents`
-   - `GET /v1/agents/{agent_id}`
-   - invoke endpoint test
-6. If deploying separately, ensure corresponding entrypoint under `entrypoints/` and Docker `CMD` are aligned.
-
-### Minimal example (registration pattern)
-```python
-claims_bot = RetrievalAgent(
-    agent_id="claims_assistant_bot",
-    prompt_template_id="claims_assistant_v1",
-)
-
-claims_profile = ExecutionProfile(
-    agent_id="claims_assistant_bot",
-    version="v1",
-    prompt_template_id="claims_assistant_v1",
-    model_profile=ModelProfile(model_id="anthropic.claude-3-5-sonnet-20241022-v2:0"),
-    retrieval_profile=RetrievalProfile(knowledge_base_ids=["kb-claims-primary"]),
-    memory_profile=MemoryProfile(enabled=True, memory_id="mem-claims-prod"),
-    guardrail_profile=GuardrailProfile(guardrail_id="gr-claims", guardrail_version="1"),
-    observability_profile=ObservabilityProfile(),
-)
-
-registry.register(claims_bot, claims_profile)
-```
-
----
-
-## 12) Governance and Security Notes
-
-- Authentication is expected upstream (API Gateway/authorizer pattern).
-- Runtime uses identity context (`user_id`, `roles`, `channel`, `correlation_id`).
-- First-release tool scope is intended to be read-only.
-- Raw prompt/response logging should remain disabled by policy unless explicitly approved.
-
----
-
-## 13) Recommended Next Improvement
-
-Externalize agent profiles from code to a control-plane data store (JSON/YAML/DB/Parameter Store), so new agents can be onboarded with configuration only and no code change in `app/dependencies/services.py`.

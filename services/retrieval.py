@@ -3,12 +3,13 @@ Bedrock Knowledge Bases retrieval service.
 Contains the search_manuals Strands tool and all retrieval logic.
 """
 import re
+import os
+import logging
 from strands import tool
-from app.core.logger import get_logger
 from app.dependencies.settings import get_settings
 from adapters.aws.boto3_factory import Boto3SessionFactory
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 settings = get_settings()
 
 MIN_RELEVANCE_SCORE = 0.25
@@ -96,14 +97,32 @@ def expand_query(query: str) -> str:
 
 def fetch_bedrock_results(search_query: str) -> list:
     client = _get_bedrock_client()
-    response = client.retrieve(
-        knowledgeBaseId=settings.bedrock_kb_id,
-        retrievalQuery={"text": search_query},
-        retrievalConfiguration={
-            "vectorSearchConfiguration": {"numberOfResults": 5, "overrideSearchType": "HYBRID"}
-        },
-    )
-    return response.get("retrievalResults", [])
+    
+    # Get KB IDs from environment (comma separated) or settings
+    kb_ids_str = os.environ.get("KNOWLEDGE_BASE_IDS", settings.bedrock_kb_id)
+    if not kb_ids_str:
+        logger.warning("No Knowledge Base IDs configured.")
+        return []
+        
+    kb_ids = [k.strip() for k in kb_ids_str.split(",") if k.strip()]
+    
+    all_results = []
+    for kb_id in kb_ids:
+        try:
+            response = client.retrieve(
+                knowledgeBaseId=kb_id,
+                retrievalQuery={"text": search_query},
+                retrievalConfiguration={
+                    "vectorSearchConfiguration": {"numberOfResults": 5, "overrideSearchType": "HYBRID"}
+                },
+            )
+            all_results.extend(response.get("retrievalResults", []))
+        except Exception as e:
+            logger.error(f"Failed to retrieve from KB {kb_id}: {e}")
+            
+    # Optional: Sort combined results by score if available
+    all_results.sort(key=lambda x: x.get("score", 0), reverse=True)
+    return all_results
 
 
 def _extract_chunk_metadata(content: str, metadata: dict, s3_uri: str) -> dict:
@@ -210,7 +229,7 @@ def get_last_retrieval_sources() -> list[dict]:
 
 @tool
 def search_manuals(query: str) -> str:
-    """Search the Coaction underwriting manuals (General Liability and Property) using the AWS Knowledge Base.
+    """Search the Coaction underwriting manuals using the AWS Knowledge Base.
 
     Args:
         query: The search query to find relevant manual content.
@@ -219,11 +238,11 @@ def search_manuals(query: str) -> str:
     try:
         search_query = expand_query(query)
         results = fetch_bedrock_results(search_query)
-        logger.info("retrieval_complete", result_count=len(results))
+        logger.info(f"retrieval_complete: found {len(results)} chunks")
         context, sources = format_retrieved_documents(results, query)
         _last_retrieval_sources = sources
         return context
     except Exception as e:
-        logger.error("bedrock_retrieval_failed", error=str(e))
+        logger.error(f"bedrock_retrieval_failed: {e}")
         _last_retrieval_sources = []
         return f"Error searching manuals: {str(e)}"

@@ -2,6 +2,7 @@
 Health and readiness router.
 
 GET /health — Liveness check.
+GET /ping   — Liveness check required by AWS AgentCore serverless runtime probes.
 GET /ready  — Dependency readiness check.
 """
 
@@ -11,9 +12,10 @@ router = APIRouter(tags=["health"])
 
 
 @router.get("/health")
+@router.get("/ping")
 async def health():
     """Liveness check."""
-    return {"status": "ok"}
+    return {"status": "healthy"}
 
 
 @router.get("/ready")

@@ -123,13 +123,18 @@ class PromptRepository:
     def __init__(self):
         self._templates = {
             "coaction_binding_authority_bot": UNDERWRITING_SYSTEM_PROMPT,
+            "vega_binding_authority_bot": UNDERWRITING_SYSTEM_PROMPT,
+            "underwriting_agent": UNDERWRITING_SYSTEM_PROMPT,
         }
 
     def get_template(self, template_id: str) -> str:
         template = self._templates.get(template_id)
         if not template:
-            raise ValueError(f"Prompt template not found: {template_id}")
+            return UNDERWRITING_SYSTEM_PROMPT
         return template
 
     def store(self, template_id: str, template: str) -> None:
         self._templates[template_id] = template
+
+
+

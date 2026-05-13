@@ -11,6 +11,7 @@ from services.telemetry import CloudWatchTelemetryEmitter
 from services.audit import MetadataOnlyAuditLogger
 from services.session_manager import SessionManager
 from adapters.aws.boto3_factory import Boto3SessionFactory
+from adapters.aws.dynamodb_session import DynamoDBSessionRepository
 from domain.execution_profile import (
     ExecutionProfile, ModelProfile, RetrievalProfile,
     MemoryProfile, GuardrailProfile, ObservabilityProfile,
@@ -106,6 +107,11 @@ def get_agent_registry() -> AgentRegistry:
 
 
 @lru_cache()
+def get_session_repo() -> DynamoDBSessionRepository:
+    return DynamoDBSessionRepository(get_boto3_factory())
+
+
+@lru_cache()
 def get_orchestrator() -> RuntimeOrchestrator:
     return RuntimeOrchestrator(
         agent_registry=get_agent_registry(),
@@ -114,4 +120,5 @@ def get_orchestrator() -> RuntimeOrchestrator:
         memory=get_memory_provider(),
         telemetry=CloudWatchTelemetryEmitter(get_boto3_factory()),
         audit=MetadataOnlyAuditLogger(),
+        session_repo=get_session_repo(),
     )

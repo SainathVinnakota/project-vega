@@ -16,6 +16,7 @@ from app.routers.sessions import router as session_router
 from app.routers.feedback import router as feedback_router
 from app.routers.health import router as health_router
 from app.routers.auth import router as auth_router
+from app.routers.threads import router as threads_router
 
 # Middleware
 from app.middleware.correlation import CorrelationIdMiddleware
@@ -29,8 +30,12 @@ async def lifespan(app: FastAPI):
     setup_logging()
     logger.info("startup", service="coaction-agent-platform")
 
-    # Create DB tables
-    Base.metadata.create_all(bind=engine)
+    # Create DB tables gracefully to prevent container startup crash in serverless runtimes
+    try:
+        Base.metadata.create_all(bind=engine)
+        logger.info("db_tables_verified")
+    except Exception as e:
+        logger.warning("db_connection_unavailable_at_startup", error=str(e))
 
     # Initialize agent registry (triggers agent creation)
     from app.dependencies.services import get_agent_registry
@@ -80,3 +85,4 @@ app.include_router(session_router)
 app.include_router(feedback_router)
 app.include_router(health_router)
 app.include_router(auth_router)
+app.include_router(threads_router)

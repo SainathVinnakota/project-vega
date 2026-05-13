@@ -11,6 +11,7 @@ Each agent's behavior is driven by its ExecutionProfile:
 """
 import uuid
 import logging
+from datetime import datetime, timezone
 
 from domain.invocation import AgentInvocationRequest, AgentInvocationResponse, SourceCitation
 from domain.identity import IdentityContext
@@ -21,6 +22,7 @@ from services.guardrails import GuardrailService
 from services.memory import AgentCoreMemoryProvider
 from services.telemetry import CloudWatchTelemetryEmitter
 from services.audit import MetadataOnlyAuditLogger
+from adapters.aws.dynamodb_session import DynamoDBSessionRepository
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +38,7 @@ class RuntimeOrchestrator:
         memory: AgentCoreMemoryProvider,
         telemetry: CloudWatchTelemetryEmitter,
         audit: MetadataOnlyAuditLogger,
+        session_repo: DynamoDBSessionRepository | None = None,
     ):
         self.registry = agent_registry
         self.authorization = authorization
@@ -43,6 +46,7 @@ class RuntimeOrchestrator:
         self.memory = memory
         self.telemetry = telemetry
         self.audit = audit
+        self.session_repo = session_repo
 
     def _build_memory_context_prompt(self, memory_context: dict) -> str:
         """
@@ -131,6 +135,16 @@ class RuntimeOrchestrator:
                 identity=identity,
                 profile=profile,
             )
+
+            # Stateless Session state recovery snapshotting
+            if self.session_repo:
+                now_iso = datetime.now(timezone.utc).isoformat()
+                await self.session_repo.save(
+                    session_id=request.session_id,
+                    agent_id=request.agent_id,
+                    user_id=identity.user_id,
+                    state={"last_invocation": now_iso, "correlation_id": identity.correlation_id},
+                )
 
             # 9. Telemetry & audit
             await self.telemetry.emit(

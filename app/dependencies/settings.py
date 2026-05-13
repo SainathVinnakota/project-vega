@@ -15,10 +15,10 @@ class Settings(BaseSettings):
     aws_secret_access_key: str | None = None
 
     # Model provider: 'openai' or 'bedrock'
-    model_provider: str = "openai"
+    model_provider: str = "bedrock"
 
     # Bedrock
-    bedrock_model_id: str = "anthropic.claude-3-5-sonnet-20241022-v2:0"
+    bedrock_model_id: str = "amazon.nova-pro-v1:0"
     bedrock_kb_id: str | None = None
 
     # S3

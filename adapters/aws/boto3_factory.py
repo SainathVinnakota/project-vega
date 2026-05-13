@@ -49,3 +49,11 @@ class Boto3SessionFactory:
         """Get the underlying boto3 Session."""
         return self._session
 
+    def resource(self, service_name: str):
+        """Create a Boto3 resource for the given AWS service."""
+        return self._session.resource(
+            service_name,
+            region_name=self.region_name,
+            config=self.config,
+        )
+
