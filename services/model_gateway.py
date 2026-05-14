@@ -4,6 +4,7 @@
 Wraps Strands agent invocation as the model gateway.
 """
 
+import re
 import structlog
 from typing import Any
 
@@ -86,7 +87,6 @@ class BedrockModelGateway:
             agent.state.messages = list(memory_context["messages"])
 
         # Execute
-        import re
 
         response = agent(request.input_text)
         answer = str(response)

@@ -4,7 +4,6 @@
 Stores and retrieves ExecutionProfiles from DynamoDB.
 """
 
-import yaml
 import structlog
 from pathlib import Path
 

@@ -167,7 +167,6 @@ class UnderwritingAgent:
         all_urls = [s["url"] for s in retrieval_sources if s.get("url") and s["url"] != "N/A"]
         
         # Parse the <used_sources> hidden XML block
-        import re
         used_sources_match = re.search(r"<used_sources>\s*(.*?)\s*</used_sources>", answer, re.DOTALL | re.IGNORECASE)
         
         cited_urls = []
