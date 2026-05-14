@@ -44,6 +44,7 @@ packages = ["coaction_agent_platform"]
 [tool.pytest.ini_options]
 testpaths = ["tests", "coaction_agent_platform/tests"]
 python_files = "test_*.py"
+pythonpath = ["."]
 
 [tool.ruff]
 line-length = 100
