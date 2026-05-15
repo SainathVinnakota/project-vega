@@ -1,6 +1,6 @@
-FROM public.ecr.aws/docker/library/python:3.11-slim
+FROM public.ecr.aws/docker/library/python:3.11-slim AS base
 
-# Install system dependencies
+# Install system dependencies required for vector databases and ORM compiling
 RUN apt-get update && apt-get install -y \
     libpq-dev \
     gcc \
@@ -8,18 +8,21 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Copy requirements and install
+# Copy requirements and install layer securely
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy source code
+# Copy platform source arrays
 COPY . .
 
-# Ensure entrypoint is executable
-RUN chmod +x entrypoints/underwriting_agent.py
-
-# Expose port 8080 (AgentCore default)
 EXPOSE 8080
 
-# Command to run the agent
-CMD ["python", "entrypoints/platform_agent.py"]
+
+# ── Target A: ECS / Fargate REST API Layer ───────────────────────────
+FROM base AS api
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
+
+
+# ── Target B: Native Serverless AgentCore Runtime Listener ───────────
+FROM base AS runtime
+CMD ["python", "entrypoints/agent_gateway.py"]

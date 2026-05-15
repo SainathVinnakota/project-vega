@@ -1,39 +1,52 @@
-"""Agent registry — manages registered agents and their execution profiles."""
-from runtime.base_agent import BaseAgent
-from domain.execution_profile import ExecutionProfile
+# coaction_agent_platform/control_plane/agent_registry.py
+"""Agent registry per HLD Section 5.
+
+Tracks registered agents, their active versions, and configuration state.
+"""
+
+import structlog
+
+logger = structlog.get_logger(__name__)
 
 
-class AgentRegistry:
-    """In-memory registry of agents and their execution profiles."""
+class AgentRegistryEntry:
+    """An entry in the agent registry."""
 
-    def __init__(self):
-        self._agents: dict[str, BaseAgent] = {}
-        self._profiles: dict[str, ExecutionProfile] = {}
+    def __init__(self, agent_id: str, active_version: str, status: str = "active"):
+        self.agent_id = agent_id
+        self.active_version = active_version
+        self.status = status
 
-    def register(self, agent: BaseAgent, profile: ExecutionProfile) -> None:
-        """Register an agent with its execution profile."""
-        self._agents[agent.agent_id] = agent
-        self._profiles[agent.agent_id] = profile
 
-    def get_agent(self, agent_id: str) -> BaseAgent:
-        agent = self._agents.get(agent_id)
-        if not agent:
-            raise ValueError(f"Agent not found: {agent_id}")
-        return agent
+class AgentRegistryRepository:
+    """Registry of deployed agents.
 
-    def get_profile(self, agent_id: str) -> ExecutionProfile:
-        profile = self._profiles.get(agent_id)
-        if not profile:
-            raise ValueError(f"Profile not found: {agent_id}")
-        return profile
+    In the first release, the registry is backed by DynamoDB.
+    Each agent has an active version that maps to an ExecutionProfile.
+    """
 
-    def list_agents(self) -> list[dict]:
-        return [
-            {
-                "agent_id": aid,
-                "agent_type": a.agent_type(),
-                "version": self._profiles[aid].version,
-                "memory_enabled": self._profiles[aid].memory_profile.enabled,
-            }
-            for aid, a in self._agents.items()
-        ]
+    def __init__(self, dynamodb_adapter=None):
+        self.dynamodb = dynamodb_adapter
+        self._registry: dict[str, AgentRegistryEntry] = {}
+
+    def register(self, agent_id: str, version: str) -> None:
+        """Register or update an agent in the registry."""
+        self._registry[agent_id] = AgentRegistryEntry(
+            agent_id=agent_id,
+            active_version=version,
+        )
+        logger.info("agent_registered", agent_id=agent_id, version=version)
+
+    async def get_active_agent(self, agent_id: str) -> AgentRegistryEntry:
+        """Get the active agent entry."""
+        if agent_id in self._registry:
+            return self._registry[agent_id]
+
+        # Default: assume version "latest"
+        entry = AgentRegistryEntry(agent_id=agent_id, active_version="latest")
+        self._registry[agent_id] = entry
+        return entry
+
+    def list_agents(self) -> list[AgentRegistryEntry]:
+        """List all registered agents."""
+        return list(self._registry.values())

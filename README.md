@@ -1,259 +1,468 @@
-# Coaction Agent Platform
+# Project Vega — Coaction Agent Platform
 
-Enterprise backend platform to create, manage, and run multiple AI agents using one reusable runtime foundation.
-
----
-
-## 1) Executive Overview
-
-This repository is designed as a platform, not a single bot application.
-
-- **Control plane** manages agent definitions (what each agent is allowed to do).
-- **Runtime plane** executes agent requests through a standard pipeline (auth, guardrails, memory, retrieval, response, telemetry).
-- **Agent teams only configure agent behavior** (prompt, KBs, memory, model, policies) instead of rewriting Bedrock/Memory integration for every agent.
-
-Business outcome: faster onboarding of new agents with lower implementation risk and better consistency.
+Configuration-driven, multi-agent platform for Coaction underwriting assistants.  
+Built with **Strands Agent SDK**, **Amazon Bedrock**, **Cognito Auth**, and **DynamoDB**.
 
 ---
 
-## 2) What This Platform Provides
+## Architecture Overview
 
-- Standard FastAPI runtime APIs for invoking agents
-- Reusable orchestration layer for all agents
-- AgentCore Memory integration for persistent memory
-- Bedrock Knowledge Base retrieval support
-- Role-based authorization and guardrail hooks
-- CloudWatch telemetry and metadata-only audit pattern
-- Agent templates (`retrieval_agent`, `readonly_tool_agent`) for quick onboarding
-
----
-
-## 3) Architecture (Control Plane + Runtime Plane)
-
-### Control plane (configuration and registration)
-- `control_plane/agent_registry.py`
-- `control_plane/prompt_repository.py`
-- `domain/execution_profile.py`
-- `agents/templates.py`
-
-Responsibility: define each agent's runtime contract (model, KB IDs, memory ID, guardrails, tools, version).
-
-### Runtime plane (execution engine)
-- `runtime/orchestrator.py`
-- `runtime/base_agent.py`
-- `runtime/strands_agent.py`
-- `services/*` (memory, retrieval, guardrails, telemetry, authorization, audit)
-- `app/routers/*` (invoke, sessions, feedback, health)
-
-Responsibility: run every request in a consistent, governed flow.
-
----
-
-## 4) Runtime Request Flow
-
-1. API receives request for `agent_id`
-2. Platform loads registered agent + `ExecutionProfile`
-3. Authorization and guardrails are applied
-4. Memory context is read (if enabled for that agent)
-5. Retrieval is executed using configured KB IDs
-6. Model generates response
-7. Output guardrails are applied
-8. Memory event is written (if enabled)
-9. Telemetry and audit metadata are emitted
-
----
-
-## 5) Repository Structure
-
-```text
-app/                    FastAPI shell (routers, middleware, dependencies)
-agents/                 Reusable agent templates
-control_plane/          Agent registry and prompt management
-domain/                 Shared contracts (invocation, identity, execution profile)
-runtime/                Base agent + orchestrator
-services/               Shared integrations (memory, retrieval, auth, etc.)
-adapters/aws/           AWS client factory and adapters
-entrypoints/            AgentCore runtime entrypoints
-query.py                CLI test utility
-Dockerfile              Container build for runtime deployment
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                          Gradio UI (/ui)                            │
+│   Signup → Confirm → Login → Chat (streaming) → KB Management      │
+└───────────────┬──────────────────────────────────────────────────────┘
+                │ HTTP (Bearer JWT)
+┌───────────────▼──────────────────────────────────────────────────────┐
+│                       FastAPI Backend (:8000)                        │
+│                                                                      │
+│  /v1/auth/*        → Cognito signup, confirm, login                  │
+│  /v1/sessions/*    → DynamoDB session CRUD                           │
+│  /v1/agents/{id}/invoke → Agent invocation                           │
+│  /v1/knowledge-bases/* → KB lifecycle (create, sync, delete)         │
+│  /health, /ping, /ready → Health checks                              │
+│  /invocations, /       → AgentCore-compatible invocation paths       │
+└───────────────┬──────────────────────────────────────────────────────┘
+                │
+┌───────────────▼──────────────────────────────────────────────────────┐
+│                       AgentService (Orchestrator)                    │
+│                                                                      │
+│  1. Load ExecutionProfile (DynamoDB or env defaults)                  │
+│  2. Initialize/cache UnderwritingAgent                               │
+│  3. Load session history from DynamoDB                               │
+│  4. Execute Strands Agent (Bedrock model + search_manuals tool)      │
+│  5. Extract follow-up questions + citations                          │
+│  6. Save session to DynamoDB                                         │
+│  7. Return AgentInvocationResponse                                   │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
----
+### Key Components
 
-## 6) Configuration Model
-
-### Platform-level environment values (shared infra defaults)
-Examples:
-- `AWS_REGION`
-- AWS credentials
-- logging and app runtime settings
-
-### Agent-level values (must be per agent)
-Stored in each agent's `ExecutionProfile`:
-- `model_profile.model_id`
-- `retrieval_profile.knowledge_base_ids` (one or many)
-- `memory_profile.memory_id`
-- `guardrail_profile.guardrail_id`
-
-Important: for multi-agent scale, avoid one global `BEDROCK_KB_ID` or one global `AGENTCORE_MEMORY_ID` for all agents.
+| Layer | Directory | Purpose |
+|-------|-----------|---------|
+| **Adapters** | `adapters/aws/` | AWS service wrappers: Cognito, DynamoDB, Bedrock KB Manager, Boto3 Factory |
+| **Agents** | `agents/` | Underwriting agent logic, prompt templates, retrieval tool |
+| **App** | `app/` | FastAPI routers, middleware, dependencies, main entry |
+| **Control Plane** | `control_plane/` | Agent registry, execution profiles, KB/memory/deployment managers |
+| **Domain** | `domain/` | Pydantic models: requests, responses, profiles, citations |
+| **Runtime** | `runtime/` | Base agent, orchestrator, response composer, host adapters |
+| **Services** | `services/` | Authorization, guardrails, memory, model gateway, telemetry, audit |
+| **UI** | `ui/` | Gradio web interface with auth, chat, KB management |
+| **Scripts** | `scripts/` | Bootstrap pipeline, crawlers, pre-push checks |
+| **Entrypoints** | `entrypoints/` | AgentCore Runtime MicroVM listener |
+| **Profiles** | `profiles/` | JSON execution profile definitions |
 
 ---
 
-## 7) Memory and Session Persistence
-
-- Persistent agent memory is handled by **AgentCore Memory** through `services/memory.py`.
-- Session metadata API in `services/session_manager.py` is currently **in-memory fallback**.
-- The current implementation does **not** persist session history in DynamoDB.
-
-If DynamoDB persistence is required, implement a DynamoDB-backed session repository and wire it through dependency injection.
-
----
-
-## 8) APIs
-
-- `POST /v1/agents/{agent_id}/invoke`
-- `GET /v1/agents`
-- `GET /v1/agents/{agent_id}`
-- `GET /v1/sessions/{session_id}`
-- `DELETE /v1/sessions/{session_id}`
-- `GET /health`
-
----
-
-## 9) Local Development
+## Quick Start
 
 ### Prerequisites
+
 - Python 3.11+
-- AWS credentials configured (if using AWS services)
+- AWS credentials with access to Bedrock, Cognito, DynamoDB
+- `.env` file (see `.env.example`)
 
-### Install
-```powershell
+### 1. Install Dependencies
+
+```bash
 pip install -r requirements.txt
+# For development (linting + testing):
+pip install ruff pytest
 ```
 
-### Run API
-```powershell
-python -m uvicorn app.main:app --reload
+### 2. Configure Environment
+
+Create a `.env` file at project root:
+
+```env
+# AWS
+AWS_REGION=us-east-1
+AWS_ACCESS_KEY_ID=your-key
+AWS_SECRET_ACCESS_KEY=your-secret
+
+# Cognito
+COGNITO_USER_POOL_ID=us-east-1_XXXXXXX
+COGNITO_APP_CLIENT_ID=your-client-id
+
+# DynamoDB
+DYNAMODB_TABLE_NAME=CoactionPlatform
+
+# Bedrock
+BEDROCK_KB_ID=your-kb-id
+BEDROCK_MODEL_ID=amazon.nova-pro-v1:0
+
+# Optional
+BEDROCK_KB_ROLE_ARN=arn:aws:iam::...
+EMBEDDING_MODEL_ARN=arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-embed-text-v2:0
+RDS_RESOURCE_ARN=...
+RDS_CREDENTIALS_SECRET_ARN=...
 ```
 
-### Test invoke
-```powershell
-curl -X POST "http://localhost:8000/v1/agents/coaction_binding_authority_bot/invoke" `
-  -H "Content-Type: application/json" `
-  -d "{\"input_text\":\"What is class code 10040?\",\"user_id\":\"u1\",\"role\":\"underwriter\"}"
+### 3. Run the Platform
+
+```bash
+# Unified mode (API + UI on one port)
+python main.py
+# → API at http://localhost:8000/v1
+# → UI at http://localhost:8000/ui
+# → Health at http://localhost:8000/health
+
+# Standalone UI (if running API separately)
+python ui/gradio_app.py
 ```
 
 ---
 
-## 10) Deployment to Amazon Bedrock AgentCore Runtime
+## How to Create a New Agent
 
-This section is written as an operational runbook from zero to deployment.
+### Method A: Manual Creation (Step by Step)
 
-### Step 1: Prepare AWS resources
-Create/identify:
-- Bedrock model access
-- Bedrock Knowledge Base(s)
-- AgentCore Memory resource(s) (one per agent recommended)
-- Optional guardrails
-- IAM role/policies required for runtime access
+This is the approach used when you want full control. You manually:
 
-### Step 2: Configure environment
-Set runtime environment values for the target environment (dev/stage/prod), for example:
-- `AWS_REGION`
-- `MODEL_PROVIDER`
-- `BEDROCK_MODEL_ID` or OpenAI model settings
-- agent-specific memory and KB values (recommended through profile configuration)
+1. **Write the prompt template** in `agents/prompts.py`:
 
-### Step 3: Select runtime entrypoint
-Choose the entrypoint to deploy:
-- `entrypoints/underwriting_agent.py`
-- `entrypoints/claims_agent.py`
-
-Update `Dockerfile` `CMD` if deploying a different entrypoint.
-
-### Step 4: Build and validate container locally
-```powershell
-docker build -t coaction-agent-platform:latest .
-docker run --rm -p 8080:8080 --env-file .env coaction-agent-platform:latest
-```
-
-### Step 5: Deploy with AgentCore CLI
-Use your AgentCore deployment configuration and run:
-```powershell
-agentcore deploy
-```
-
-Notes:
-- Use container deployment mode for Windows environments.
-- Ensure your deployment manifest references the correct runtime entrypoint/container settings.
-- Validate logs in CloudWatch after deployment.
-
-### Step 6: Post-deployment validation
-- Invoke deployed endpoint with a test prompt
-- Verify retrieval citations and memory behavior
-- Confirm telemetry/audit events
-- Validate role-based behavior and guardrails
-
----
-
-## 11) How to Create a New Agent (Non-Technical + Technical)
-
-### Plain-English view
-To create a new agent, you provide four things:
-1. Agent name and purpose
-2. Prompt template (how the agent should behave)
-3. Data sources (which KB IDs it can read)
-4. Memory and policy settings (which memory ID, guardrails, tools)
-
-The platform then runs this agent using the same shared backend services.
-
-### Technical checklist
-1. Add prompt template in `control_plane/prompt_repository.py`.
-2. Create/register agent instance in `app/dependencies/services.py` (use `RetrievalAgent` or `ReadOnlyToolAgent`).
-3. Define `ExecutionProfile` for that `agent_id` with:
-   - model profile
-   - retrieval KB IDs
-   - memory ID
-   - guardrails and observability
-4. Register using `registry.register(agent, profile)`.
-5. Start app and validate:
-   - `GET /v1/agents`
-   - `GET /v1/agents/{agent_id}`
-   - invoke endpoint test
-6. If deploying separately, ensure corresponding entrypoint under `entrypoints/` and Docker `CMD` are aligned.
-
-### Minimal example (registration pattern)
 ```python
-claims_bot = RetrievalAgent(
-    agent_id="claims_assistant_bot",
-    prompt_template_id="claims_assistant_v1",
-)
+PROMPT_TEMPLATES["my_new_agent_v1"] = """<role>
+You are an expert assistant for XYZ domain...
+</role>
 
-claims_profile = ExecutionProfile(
-    agent_id="claims_assistant_bot",
-    version="v1",
-    prompt_template_id="claims_assistant_v1",
-    model_profile=ModelProfile(model_id="anthropic.claude-3-5-sonnet-20241022-v2:0"),
-    retrieval_profile=RetrievalProfile(knowledge_base_ids=["kb-claims-primary"]),
-    memory_profile=MemoryProfile(enabled=True, memory_id="mem-claims-prod"),
-    guardrail_profile=GuardrailProfile(guardrail_id="gr-claims", guardrail_version="1"),
-    observability_profile=ObservabilityProfile(),
-)
+<tool_usage_rules>
+- Call the search_manuals tool ONCE per query...
+</tool_usage_rules>
 
-registry.register(claims_bot, claims_profile)
+<response_format>
+- Answer first, then citations, then follow-ups
+</response_format>
+"""
+```
+
+2. **Create a Knowledge Base** in AWS Bedrock console:
+   - Go to AWS Console → Bedrock → Knowledge Bases → Create
+   - Select embedding model, storage (Aurora pgvector or OpenSearch)
+   - Add S3 data source with your documents
+   - Note the `kb_id` after creation
+
+3. **Create a Memory** (optional, for conversation persistence):
+   - Use AgentCore Memory API or configure DynamoDB-backed sessions
+
+4. **Store an Execution Profile** in DynamoDB:
+
+```python
+from adapters.aws.dynamodb import DynamoDBAdapter
+
+db = DynamoDBAdapter(table_name="CoactionPlatform", region="us-east-1")
+db.save_execution_profile(
+    agent_id="my-new-agent",
+    version="latest",
+    profile_data={
+        "agent_id": "my-new-agent",
+        "version": "1.0",
+        "prompt_template_id": "my_new_agent_v1",
+        "model_profile": {
+            "model_id": "amazon.nova-pro-v1:0",
+            "temperature": 0.0,
+            "max_tokens": 4096
+        },
+        "retrieval_profile": {
+            "knowledge_base_ids": ["YOUR_KB_ID"],
+            "enabled": True
+        },
+        "memory_profile": {"enabled": True}
+    }
+)
+```
+
+5. **Invoke your agent**:
+
+```bash
+curl -X POST http://localhost:8000/v1/agents/my-new-agent/invoke \
+  -H "Authorization: Bearer <your-jwt-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"input_text": "What are the coverage limits?"}'
+```
+
+6. **Deploy to AgentCore** (optional via Console):
+Instead of CLI, navigate to the AWS console, create a new AgentCore runtime, and point it to your ECR container URI.
+
+### Method B: Automated Pipeline (Single File)
+
+This uses the bootstrap pipeline to create KB + Memory + deploy automatically:
+
+1. **Create a JSON execution profile** at `profiles/my_agent.json`:
+
+```json
+{
+  "agent_id": "my-new-agent",
+  "version": "1.0",
+  "prompt_template_id": "my_new_agent_v1",
+  "s3_bucket": "my-data-bucket",
+  "s3_prefix": "docs/my-agent/",
+  "model_profile": {
+    "model_id": "amazon.nova-pro-v1:0",
+    "temperature": 0.0,
+    "max_tokens": 4096
+  },
+  "retrieval_profile": {
+    "knowledge_base_ids": [],
+    "enabled": true
+  },
+  "memory_profile": {
+    "enabled": true
+  }
+}
+```
+
+2. **Run the bootstrap pipeline**:
+
+```bash
+python scripts/platform_bootstrap.py \
+  my-new-agent \
+  my-data-bucket \
+  arn:aws:iam::123456:role/BedrockKBRole
+```
+
+This will automatically:
+- Create a Bedrock Knowledge Base
+- Add S3 data source and trigger sync
+- Create AgentCore Memory (if configured)
+- Deploy the agent to the AWS AgentCore Runtime
+
+3. **The agent is now live** — invoke it via the API or Gradio UI.
+
+---
+
+## Pushing Code Updates to Existing Agents
+
+When you modify the codebase (such as updating prompts in `agents/prompts.py` or agent logic), you must push the changes to AWS AgentCore.
+
+### Method A: Automated Deployment Pipeline (Recommended)
+1. **Build and push the updated container to ECR**:
+```bash
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin <your-account-id>.dkr.ecr.us-east-1.amazonaws.com
+
+# Build specifically for AWS Graviton (ARM64)
+docker buildx build --target runtime --platform linux/arm64 -t <your-account-id>.dkr.ecr.us-east-1.amazonaws.com/vega-platform:latest --push .
+```
+
+2. **Trigger the automated AgentCore update**:
+```bash
+python scripts/platform_bootstrap.py \
+  <your_agent_id> \
+  <your_bucket_name> \
+  arn:aws:iam::<your-account-id>:role/VegaPlatformExecutionRole
+```
+Because the KB already exists, it skips creation and directly publishes a new AgentCore version, automatically updating your `DEFAULT` endpoint.
+
+### Method B: Manual Deployment via AWS Console
+1. Run the same `docker build` and `docker push` commands as Method A to upload the new container to ECR.
+2. Go to the **AWS Console** → **Bedrock** → **AgentCore**.
+3. Select your Agent Runtime.
+4. Click **Create Version** (this pulls the new container).
+5. Go to **Endpoints**, select the `DEFAULT` endpoint, click **Edit**, and change the associated version to the newly created version.
+
+---
+
+## Deployment
+
+### Local Development
+
+```bash
+python main.py
+```
+
+### Docker
+
+```bash
+docker build -t project-vega .
+docker run -p 8000:8000 --env-file .env project-vega
+```
+
+### AgentCore Runtime
+
+```bash
+# Configure
+agentcore configure
+
+# Deploy
+agentcore deploy --config .bedrock_agentcore.yaml
+```
+
+### ECS/Fargate
+
+Use the CI/CD pipeline (`.github/workflows/ci.yml`) which:
+1. Runs ruff lint + format check
+2. Runs pytest
+3. Builds Docker image
+4. Pushes to ECR
+5. Deploys to ECS
+
+---
+
+## Code Quality & CI/CD
+
+### Pre-Push Checks
+
+**Before any commit**, run:
+
+```bash
+# Check only (no modifications)
+python scripts/pre_push_check.py
+
+# Auto-fix lint errors and format code
+python scripts/pre_push_check.py --fix
+```
+
+This runs:
+1. **Ruff Linter** — catches import errors, unused variables, bare excepts
+2. **Ruff Formatter** — ensures consistent code style
+3. **Pytest** — runs all unit tests
+
+### Makefile Targets
+
+```bash
+make lint          # Run ruff check
+make format        # Run ruff format
+make test          # Run pytest
+make check         # Run all checks (lint + format + test)
+make fix           # Auto-fix lint + reformat
+```
+
+### GitHub Actions CI
+
+The `.github/workflows/ci.yml` pipeline runs on every push/PR:
+- Ruff lint check
+- Ruff format conformance
+- Pytest suite
+
+---
+
+## Project Structure
+
+```
+project-vega/
+├── adapters/
+│   └── aws/
+│       ├── bedrock_kb_manager.py   # KB lifecycle (create/sync/delete)
+│       ├── boto3_factory.py        # Centralized AWS client creation
+│       ├── cognito.py              # Cognito signup/login/confirm
+│       ├── dynamodb.py             # Single-table DynamoDB adapter
+│       └── jwt_verifier.py         # Cognito JWT RS256 verification
+├── agents/
+│   ├── prompts.py                  # System prompt templates
+│   ├── underwriting_agent.py       # Strands Agent with Bedrock + KB
+│   └── tools/
+│       └── retriever.py            # search_manuals tool (Bedrock KB)
+├── app/
+│   ├── main.py                     # FastAPI app with lifespan wiring
+│   ├── core/
+│   │   ├── auth.py                 # Local auth fallback
+│   │   └── logger.py               # Structured logging
+│   ├── db/
+│   │   ├── database.py             # SQLAlchemy (local dev)
+│   │   └── models.py               # Local DB models
+│   ├── dependencies/
+│   │   ├── identity.py             # Cognito JWT identity extraction
+│   │   ├── services.py             # DI container
+│   │   └── settings.py             # Environment settings
+│   ├── middleware/
+│   │   ├── correlation.py          # Correlation ID middleware
+│   │   └── errors.py               # Error handler middleware
+│   └── routers/
+│       ├── agent_router.py         # /v1/agents/{id}/invoke
+│       ├── auth_router.py          # /v1/auth/signup|confirm|login
+│       ├── health.py               # /health, /ping, /ready
+│       ├── kb_router.py            # /v1/knowledge-bases CRUD
+│       ├── session_router.py       # /v1/sessions CRUD
+│       ├── feedback.py             # User feedback
+│       └── threads.py              # Thread management
+├── control_plane/
+│   ├── agent_registry.py           # Agent registration
+│   ├── deployment_manager.py       # Cloud deployment
+│   ├── execution_profile_repository.py  # Profile loading
+│   ├── kb_manager.py               # KB provisioning (pipeline)
+│   ├── memory_manager.py           # Memory provisioning (pipeline)
+│   └── prompt_repository.py        # Prompt loading from config
+├── domain/
+│   └── models.py                   # All Pydantic models (unified)
+├── entrypoints/
+│   └── agent_gateway.py            # AgentCore MicroVM entrypoint
+├── runtime/
+│   ├── base_agent.py               # Abstract base agent
+│   ├── context_builder.py          # Context assembly
+│   ├── host_adapter.py             # Runtime host abstraction
+│   ├── orchestrator.py             # 12-step execution pipeline
+│   ├── response_composer.py        # Response envelope builder
+│   └── strands_agent.py            # Agent type definitions
+├── services/
+│   ├── agent_service.py            # Central orchestrator (profile→agent→execute→save)
+│   ├── audit.py                    # Metadata-only audit logger
+│   ├── authorization.py            # Platform authorization
+│   ├── guardrails.py               # Bedrock Guardrails integration
+│   ├── memory.py                   # AgentCore Memory provider
+│   ├── model_gateway.py            # Strands + Bedrock model gateway
+│   ├── retrieval.py                # KB retrieval (legacy/fallback)
+│   ├── session_manager.py          # In-memory session fallback
+│   ├── telemetry.py                # CloudWatch telemetry emitter
+│   └── tool_gateway.py             # Read-only tool gateway
+├── ui/
+│   └── gradio_app.py               # Gradio UI (auth + chat + KB mgmt)
+├── scripts/
+│   ├── pre_push_check.py           # CI verification (ruff + pytest)
+│   ├── platform_bootstrap.py       # Automated agent pipeline
+│   ├── query.py                    # Testing tool
+│   └── crawlers/                   # Web crawlers for data ingestion
+├── profiles/
+│   └── vega_binding_authority_bot.json  # Default agent profile
+├── tests/
+│   └── unit/                       # Unit tests
+├── .github/workflows/ci.yml        # GitHub Actions CI
+├── Dockerfile                       # Production container
+├── Makefile                         # Build targets
+├── main.py                         # Root entry point
+├── pyproject.toml                   # Project config
+└── README.md                       # This file
 ```
 
 ---
 
-## 12) Governance and Security Notes
+## API Reference
 
-- Authentication is expected upstream (API Gateway/authorizer pattern).
-- Runtime uses identity context (`user_id`, `roles`, `channel`, `correlation_id`).
-- First-release tool scope is intended to be read-only.
-- Raw prompt/response logging should remain disabled by policy unless explicitly approved.
+### Authentication
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/v1/auth/signup` | POST | Register new user (Cognito) |
+| `/v1/auth/confirm` | POST | Confirm email with code |
+| `/v1/auth/login` | POST | Login, get JWT tokens |
+
+### Agent Invocation
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/v1/agents/{agent_id}/invoke` | POST | Invoke an agent |
+| `/v1/agents/{agent_id}/health` | GET | Check agent health |
+
+### Sessions
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/v1/sessions` | GET | List user's chat sessions |
+| `/v1/sessions/{id}` | GET | Get session with messages |
+| `/v1/sessions/{id}` | DELETE | Delete a session |
+
+### Knowledge Bases
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/v1/knowledge-bases` | POST | Create new KB (underwriter only) |
+| `/v1/knowledge-bases` | GET | List all KBs |
+| `/v1/knowledge-bases/{id}` | GET | Get KB details |
+| `/v1/knowledge-bases/{id}/sync` | POST | Trigger re-sync |
+| `/v1/knowledge-bases/{id}` | DELETE | Delete KB |
 
 ---
 
-## 13) Recommended Next Improvement
+## License
 
-Externalize agent profiles from code to a control-plane data store (JSON/YAML/DB/Parameter Store), so new agents can be onboarded with configuration only and no code change in `app/dependencies/services.py`.
+Proprietary — Coaction Specialty Insurance.

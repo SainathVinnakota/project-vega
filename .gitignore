@@ -33,3 +33,9 @@ scratch/
 
 # IAM / infra (account-specific)
 iam-policy-update.json
+
+# SSL Certificates
+global-bundle.pem
+
+# Reference repositories (cloned for comparison only)
+vega_ref/
