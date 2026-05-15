@@ -90,7 +90,7 @@ DYNAMODB_TABLE_NAME=CoactionPlatform
 
 # Bedrock
 BEDROCK_KB_ID=your-kb-id
-BEDROCK_MODEL_ID=amazon.nova-pro-v1:0
+BEDROCK_MODEL_ID=openai.gpt-oss-safeguard-120b
 
 # Optional
 BEDROCK_KB_ROLE_ARN=arn:aws:iam::...
@@ -103,7 +103,7 @@ RDS_CREDENTIALS_SECRET_ARN=...
 
 ```bash
 # Unified mode (API + UI on one port)
-python main.py
+python -m uvicorn app.main:app --reload
 # → API at http://localhost:8000/v1
 # → UI at http://localhost:8000/ui
 # → Health at http://localhost:8000/health
@@ -160,7 +160,7 @@ db.save_execution_profile(
         "version": "1.0",
         "prompt_template_id": "my_new_agent_v1",
         "model_profile": {
-            "model_id": "amazon.nova-pro-v1:0",
+            "model_id": "openai.gpt-oss-safeguard-120b",
             "temperature": 0.0,
             "max_tokens": 4096
         },
@@ -199,7 +199,7 @@ This uses the bootstrap pipeline to create KB + Memory + deploy automatically:
   "s3_bucket": "my-data-bucket",
   "s3_prefix": "docs/my-agent/",
   "model_profile": {
-    "model_id": "amazon.nova-pro-v1:0",
+    "model_id": "openai.gpt-oss-safeguard-120b",
     "temperature": 0.0,
     "max_tokens": 4096
   },
@@ -268,7 +268,7 @@ Because the KB already exists, it skips creation and directly publishes a new Ag
 ### Local Development
 
 ```bash
-python main.py
+python -m uvicorn app.main:app --reload
 ```
 
 ### Docker
