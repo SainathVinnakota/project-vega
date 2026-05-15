@@ -8,18 +8,67 @@ import requests
 import os
 import uuid
 from datetime import datetime
+from urllib.parse import urlparse
 
-# Optional: Import the FastAPI app for unified deployment
+# Optional: import FastAPI app for unified `python ui/gradio_app.py` launch
 try:
     from app.main import app as fastapi_app
 except ImportError:
     fastapi_app = None
 
-# Unified Deployment: If we are running in the same process, point to localhost or relative path
-API_BASE = os.getenv("API_BASE_URL", "/v1" if fastapi_app else "http://localhost:8000/v1")
 ALLOWED_ROLES = ("agent", "underwriter", "external")
 
+
+def resolve_api_base() -> str:
+    """Absolute API base URL for server-side requests (requests requires http://)."""
+    explicit = (os.getenv("API_BASE_URL") or "").strip().rstrip("/")
+    if explicit:
+        if not explicit.startswith(("http://", "https://")):
+            explicit = f"http://{explicit.lstrip('/')}"
+        return explicit
+    host = os.getenv("API_HOST", "127.0.0.1")
+    port = os.getenv("API_PORT") or os.getenv("PORT", "8000")
+    return f"http://{host}:{port}/v1"
+
+
+API_BASE = resolve_api_base()
+
 # ─── Helpers ─────────────────────────────────────────────────────────────────
+
+
+def api_error_detail(response: requests.Response) -> str:
+    try:
+        detail = response.json().get("detail", response.text)
+    except Exception:
+        return response.text or f"HTTP {response.status_code}"
+    if isinstance(detail, list):
+        parts = []
+        for item in detail:
+            if isinstance(item, dict):
+                loc = ".".join(str(x) for x in item.get("loc", ()))
+                parts.append(f"{loc}: {item.get('msg', item)}" if loc else str(item.get("msg", item)))
+            else:
+                parts.append(str(item))
+        return "; ".join(parts) if parts else str(detail)
+    return str(detail)
+
+
+def connection_error_message(exc: Exception) -> str:
+    msg = str(exc)
+    if any(
+        token in msg
+        for token in (
+            "Connection refused",
+            "No connection could be made",
+            "Name or service not known",
+            "timed out",
+        )
+    ):
+        return (
+            f"Cannot reach API at {API_BASE}. "
+            "Start the backend: python -m uvicorn app.main:app --reload --port 8000"
+        )
+    return msg
 
 
 def new_session_id() -> str:
@@ -48,11 +97,13 @@ def signup_user(name: str, email: str, password: str, role: str):
             timeout=10,
         )
         if r.status_code >= 400:
-            detail = r.json().get("detail", r.text)
+            detail = api_error_detail(r)
+            if r.status_code == 503 and "not initialized" in detail.lower():
+                detail += " Set COGNITO_USER_POOL_ID and COGNITO_APP_CLIENT_ID in .env."
             return f"Signup failed: {detail}"
-        return "Signup successful. Please login."
+        return "Signup successful. Check your email for a verification code, then verify below."
     except Exception as exc:
-        return f"Signup failed: {exc}"
+        return f"Signup failed: {connection_error_message(exc)}"
 
 
 def verify_user(email: str, code: str):
@@ -65,11 +116,10 @@ def verify_user(email: str, code: str):
             timeout=10,
         )
         if r.status_code >= 400:
-            detail = r.json().get("detail", r.text)
-            return f"❌ Verification failed: {detail}"
-        return "✅ Verification successful! You can now switch to the Login tab."
+            return f"Verification failed: {api_error_detail(r)}"
+        return "Verification successful. You can now log in."
     except Exception as exc:
-        return f"❌ Verification failed: {exc}"
+        return f"Verification failed: {connection_error_message(exc)}"
 
 
 def login_user(email: str, password: str):
@@ -90,18 +140,19 @@ def login_user(email: str, password: str):
             timeout=10,
         )
         if r.status_code >= 400:
-            if r.status_code == 401:
-                detail = "Invalid credentials"
-            else:
-                detail = r.json().get("detail", r.text)
+            detail = api_error_detail(r)
+            if r.status_code == 503 and "not initialized" in detail.lower():
+                detail += " Set COGNITO_USER_POOL_ID and COGNITO_APP_CLIENT_ID in .env."
             return (
                 {"authenticated": False, "name": "", "email": "", "role": "", "token": ""},
                 f"Login failed: {detail}",
                 gr.update(visible=False),
-                gr.update(visible=True),
-                "",
-                gr.update(choices=[]),
-            )
+            gr.update(visible=False),
+            gr.update(visible=True),
+            "",
+            gr.update(choices=[]),
+            gr.update(visible=False)
+        )
         payload = r.json()
         user = payload.get("user", {})
         token = payload.get("access_token", "")
@@ -152,7 +203,7 @@ def login_user(email: str, password: str):
     except Exception as exc:
         return (
             {"authenticated": False, "name": "", "email": "", "role": "", "token": ""},
-            f"Login failed: {exc}",
+            f"Login failed: {connection_error_message(exc)}",
             gr.update(visible=False),
             gr.update(visible=True),
             "",
@@ -251,166 +302,158 @@ def create_kb(name, desc, bucket, prefix, user_state):
 
 def api_health() -> str:
     try:
-        r = requests.get(API_BASE.replace("/api/v1", "/health"), timeout=2)
-        return "🟢 Online" if r.ok else "🟡 Degraded"
+        parsed = urlparse(API_BASE)
+        health_url = f"{parsed.scheme}://{parsed.netloc}/health"
+        r = requests.get(health_url, timeout=2)
+        return "Online" if r.ok else "Degraded"
     except Exception:
-        return "🔴 Offline"
+        return "Offline"
 
 
 # ─── Theme ───────────────────────────────────────────────────────────────────
 
-THEME = gr.themes.Soft(
-    font=[gr.themes.GoogleFont("Inter"), "ui-sans-serif", "system-ui", "sans-serif"],
-    primary_hue="blue",
-    neutral_hue="slate",
-    radius_size=gr.themes.sizes.radius_md,
+THEME = gr.themes.Monochrome(
+    font=[gr.themes.GoogleFont("IBM Plex Sans"), "ui-sans-serif", "system-ui", "sans-serif"],
+    radius_size=gr.themes.sizes.radius_sm,
 ).set(
-    body_background_fill="*neutral_50",
-    block_background_fill="white",
-    block_border_width="0px",
-    block_label_background_fill="*primary_100",
-    button_primary_background_fill="linear-gradient(135deg, *primary_600, *primary_500)",
-    button_primary_background_fill_hover="linear-gradient(135deg, *primary_500, *primary_400)",
-    button_primary_text_color="white",
-    button_secondary_background_fill="white",
-    button_secondary_border_color="*neutral_200",
-    button_secondary_text_color="*neutral_700",
-    border_color_primary="*neutral_200",
-    color_accent_soft="*primary_50",
-    panel_background_fill="white",
+    body_background_fill="#fafafa",
+    block_background_fill="#ffffff",
+    block_border_width="1px",
+    block_border_color="#e5e5e5",
+    block_label_background_fill="#f5f5f5",
+    block_label_text_color="#525252",
+    button_primary_background_fill="#171717",
+    button_primary_background_fill_hover="#404040",
+    button_primary_text_color="#ffffff",
+    button_secondary_background_fill="#ffffff",
+    button_secondary_border_color="#d4d4d4",
+    button_secondary_text_color="#404040",
+    border_color_primary="#e5e5e5",
+    color_accent_soft="#f5f5f5",
+    panel_background_fill="#ffffff",
+    input_background_fill="#ffffff",
 )
 
 # ─── CSS ─────────────────────────────────────────────────────────────────────
 
 CSS = """
-/* Ultra-Premium Glassmorphism UI */
+/* Minimalist monochrome */
 body, .gradio-container {
-    background: linear-gradient(135deg, #f6f8fd, #f1f5f9) !important;
+    background: #fafafa !important;
+    color: #171717 !important;
 }
 
-/* Sidebar Styling */
 .sidebar {
-    background: rgba(255, 255, 255, 0.7) !important;
-    backdrop-filter: blur(12px) !important;
-    border-right: 1px solid rgba(255, 255, 255, 0.5) !important;
+    background: #ffffff !important;
+    border-right: 1px solid #e5e5e5 !important;
 }
 
-/* Chatbot container */
-#chatbot { 
-    height: 680px !important; 
-    border: 1px solid rgba(255, 255, 255, 0.6) !important;
-    background: rgba(255, 255, 255, 0.4) !important;
-    backdrop-filter: blur(16px) !important;
-    border-radius: 24px !important;
-    box-shadow: 0 10px 40px -10px rgba(0,0,0,0.05) !important;
-    padding: 15px !important;
+#chatbot {
+    height: 680px !important;
+    border: 1px solid #e5e5e5 !important;
+    background: #ffffff !important;
+    border-radius: 8px !important;
+    box-shadow: none !important;
+    padding: 12px !important;
 }
 
-/* Message Bubbles (Handles both Gradio versions) */
 .message-row.user .message, #chatbot .message.user {
-    background: linear-gradient(135deg, #4f46e5, #3b82f6) !important;
-    color: white !important;
-    border-radius: 20px 20px 4px 20px !important;
-    padding: 14px 20px !important;
-    box-shadow: 0 8px 16px -4px rgba(59, 130, 246, 0.3) !important;
+    background: #171717 !important;
+    color: #ffffff !important;
+    border-radius: 12px 12px 2px 12px !important;
+    padding: 12px 16px !important;
     border: none !important;
+    box-shadow: none !important;
 }
-.message-row.user .message *, #chatbot .message.user * { color: white !important; }
+.message-row.user .message *, #chatbot .message.user * { color: #ffffff !important; }
 
 .message-row.bot .message, #chatbot .message.bot {
-    background: #ffffff !important;
-    color: #1e293b !important;
-    border-radius: 20px 20px 20px 4px !important;
-    padding: 14px 20px !important;
-    box-shadow: 0 4px 12px -2px rgba(0, 0, 0, 0.05) !important;
-    border: 1px solid #f1f5f9 !important;
-}
-
-/* Smaller text in messages */
-.message-wrap { 
-    font-size: 0.95rem !important; 
-    line-height: 1.65 !important; 
-    letter-spacing: -0.01em !important;
-}
-
-/* Follow-up row buttons (Chips) */
-.fu-row {
-    margin-top: 10px !important;
-    gap: 8px !important;
-}
-.fu-row button { 
-    background: #f8fafc !important;
-    border: 1px solid #e2e8f0 !important;
-    color: #334155 !important;
-    border-radius: 100px !important;
-    font-size: 0.82rem !important; 
-    padding: 8px 18px !important;
-    text-align: left !important; 
-    transition: all 0.2s ease !important;
-    box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05) !important;
-}
-.fu-row button:hover {
-    background: #f1f5f9 !important;
-    border-color: #cbd5e1 !important;
-    transform: translateY(-1px);
-    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05) !important;
-}
-
-/* Suggestion row */
-.sug-row {
-    justify-content: center;
-    gap: 12px !important;
-    margin-top: 20px !important;
-}
-.sug-row button { 
-    border-radius: 12px !important;
-    padding: 10px 16px !important;
-    background: white !important;
-    box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px -1px rgba(0, 0, 0, 0.1) !important;
-    border: 1px solid #e2e8f0 !important;
-    color: #475569 !important;
-    font-size: 0.82rem !important; 
-    font-weight: 500 !important;
-    transition: all 0.2s ease !important;
-}
-.sug-row button:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1) !important;
-    color: #2563eb !important;
-    border-color: #bfdbfe !important;
-}
-
-/* Input Bar Styling */
-#msg-box {
-    border-radius: 24px !important;
-    background: white !important;
-    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05) !important;
-    border: 1px solid #e2e8f0 !important;
-    overflow: hidden !important;
-}
-#msg-box textarea { 
-    font-size: 0.95rem !important; 
-    padding: 14px 20px !important;
-    border: none !important;
-}
-#msg-box textarea:focus {
+    background: #f5f5f5 !important;
+    color: #262626 !important;
+    border-radius: 12px 12px 12px 2px !important;
+    padding: 12px 16px !important;
+    border: 1px solid #e5e5e5 !important;
     box-shadow: none !important;
 }
 
-/* Links in messages */
-#chatbot a { 
-    color: #2563eb !important; 
-    font-weight: 600 !important; 
-    text-decoration: none !important; 
-    border-bottom: 1px solid transparent;
-    transition: all 0.2s ease;
-}
-#chatbot a:hover {
-    border-bottom: 1px solid #2563eb;
+.message-wrap {
+    font-size: 0.92rem !important;
+    line-height: 1.6 !important;
 }
 
-/* Hide footer */
-footer { display: none !important; }
+.fu-row {
+    margin-top: 8px !important;
+    gap: 6px !important;
+}
+.fu-row button {
+    background: #ffffff !important;
+    border: 1px solid #d4d4d4 !important;
+    color: #404040 !important;
+    border-radius: 999px !important;
+    font-size: 0.8rem !important;
+    padding: 6px 14px !important;
+    box-shadow: none !important;
+}
+.fu-row button:hover {
+    background: #f5f5f5 !important;
+    border-color: #a3a3a3 !important;
+}
+
+.sug-row {
+    justify-content: center;
+    gap: 8px !important;
+    margin-top: 12px !important;
+}
+.sug-row button {
+    border-radius: 6px !important;
+    padding: 8px 14px !important;
+    background: #ffffff !important;
+    border: 1px solid #d4d4d4 !important;
+    color: #525252 !important;
+    font-size: 0.8rem !important;
+    box-shadow: none !important;
+}
+.sug-row button:hover {
+    background: #f5f5f5 !important;
+    border-color: #737373 !important;
+    color: #171717 !important;
+}
+
+#msg-box {
+    border-radius: 8px !important;
+    background: #ffffff !important;
+    border: 1px solid #d4d4d4 !important;
+    box-shadow: none !important;
+}
+#msg-box textarea {
+    font-size: 0.92rem !important;
+    padding: 12px 14px !important;
+}
+
+#chatbot a {
+    color: #171717 !important;
+    font-weight: 600 !important;
+    text-decoration: underline !important;
+}
+
+/* Hide ALL Gradio 6.x footer, API, and Settings elements - Ultra Aggressive */
+footer, 
+.gradio-container .prose.footer, 
+.gradio-container .built-with, 
+.show-api, 
+.settings-button, 
+.settings-menu,
+#footer,
+[class*="footer"],
+[class*="built-with"],
+[class*="show-api"] { 
+    display: none !important; 
+    visibility: hidden !important;
+    height: 0 !important;
+    padding: 0 !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+}
 
 /* Fix dropdown arrow collision and layout */
 #history-dropdown .wrap {
@@ -457,41 +500,65 @@ SUGGESTIONS = []
 # ─── Core chat logic ─────────────────────────────────────────────────────────
 
 
-def respond(message, history, session_id, top_k, user_state):
-    """
-    Generator that yields (history, session_id, fu1, fu2, fu3, sug_visible, msg)
+def add_user_message(message, history, session_id, user_state):
+    """Step 1: Immediately show user message.
+    
+    This runs instantly before the API call, so the user sees their
+    message on the right side without delay. Gradio's built-in loading
+    spinner handles the waiting indicator.
     """
     if not user_state or not user_state.get("authenticated"):
         history = list(history or [])
         history.append({"role": "assistant", "content": "⚠️ Please login to use the bot."})
-        yield history, session_id, gr.skip(), gr.skip(), gr.skip(), gr.skip(), ""
-        return
+        return history, session_id, "", gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
 
     if not message or not message.strip():
-        yield history, session_id, gr.skip(), gr.skip(), gr.skip(), gr.skip(), ""
-        return
+        return history or [], session_id, "", gr.skip(), gr.skip(), gr.skip(), gr.skip()
 
     if not session_id:
         session_id = new_session_id()
 
     history = list(history or [])
-
     history.append({"role": "user", "content": message})
-    history.append({"role": "assistant", "content": "⏳ Thinking…"})
-    yield (
+
+    return (
         history,
         session_id,
-        gr.update(visible=False),
-        gr.update(visible=False),
-        gr.update(visible=False),
-        gr.update(visible=False),
-        "",
+        "",  # clear msg box
+        gr.update(visible=False),  # fu1
+        gr.update(visible=False),  # fu2
+        gr.update(visible=False),  # fu3
+        gr.update(visible=False),  # sug_row
     )
+
+
+def get_response(history, session_id, top_k, user_state):
+    """Step 2: Make API call and update the assistant response.
+    
+    Called after add_user_message, so the user message is already visible.
+    """
+    if not history or len(history) < 1:
+        return history or [], session_id, gr.skip(), gr.skip(), gr.skip(), gr.skip()
+
+    # The last message is the user message (no more thinking placeholder)
+    raw_content = history[-1].get("content", "")
+
+    # Gradio 6.x may store content as a list of blocks: [{"text": "hello", "type": "text"}]
+    if isinstance(raw_content, list):
+        last_user_msg = " ".join(
+            block.get("text", "") if isinstance(block, dict) else str(block)
+            for block in raw_content
+        ).strip()
+    else:
+        last_user_msg = str(raw_content).strip()
+
+    if not last_user_msg or last_user_msg == "⚠️ Please login to use the bot.":
+        return history, session_id, gr.skip(), gr.skip(), gr.skip(), gr.skip()
 
     try:
         r = requests.post(
             f"{API_BASE}/agents/coaction-underwriting/invoke",
-            json={"input_text": message, "session_id": session_id or "", "top_k": top_k},
+            json={"input_text": last_user_msg, "session_id": session_id or "", "top_k": top_k},
             headers=get_headers(user_state.get("token", "")),
             timeout=120,
         )
@@ -520,7 +587,7 @@ def respond(message, history, session_id, top_k, user_state):
                 uri = c.get("uri") or "#"
                 answer += f"\nSource Manual: {manual}\nSection: {title}\nLink: {uri}\n"
 
-        history[-1]["content"] = answer
+        history.append({"role": "assistant", "content": answer})
         fups = data.get("metadata", {}).get("follow_up_questions", [])
         fu_updates = []
         for i in range(3):
@@ -529,23 +596,27 @@ def respond(message, history, session_id, top_k, user_state):
             else:
                 fu_updates.append(gr.update(visible=False))
 
-        yield (history, session_id, *fu_updates, gr.update(visible=False), "")
+        return (history, session_id, *fu_updates, gr.update(visible=False))
 
     except Exception as exc:
-        history[-1]["content"] = f"⚠️ {exc}"
-        yield (
+        history.append({"role": "assistant", "content": f"⚠️ {exc}"})
+        return (
             history,
             session_id,
             gr.update(visible=False),
             gr.update(visible=False),
             gr.update(visible=False),
             gr.update(visible=False),
-            "",
         )
 
 
 def on_followup(text, history, session_id, top_k, user_state):
-    yield from respond(text, history, session_id, top_k, user_state)
+    """Handle follow-up button clicks — same two-step flow."""
+    step1 = add_user_message(text, history, session_id, user_state)
+    # step1 returns: (history, session_id, msg, fu1, fu2, fu3, sug_row)
+    updated_history = step1[0]
+    updated_session = step1[1]
+    return get_response(updated_history, updated_session, top_k, user_state)
 
 
 def on_clear():
@@ -564,7 +635,9 @@ def on_clear():
 
 
 def build():
-    with gr.Blocks(title="Coaction Binding Authority Assistant", head=HEAD_JS) as app:
+    with gr.Blocks(title="Coaction Binding Authority Assistant", theme=THEME) as app:
+        app.head = HEAD_JS
+        app.css = CSS
         session_state = gr.State("")
         user_state = gr.State(
             {"authenticated": False, "name": "", "email": "", "role": "", "token": ""}
@@ -580,8 +653,8 @@ def build():
             with gr.Accordion("⚙ Settings", open=False):
                 top_k = gr.Slider(1, 20, value=5, step=1, label="Search depth")
                 gr.HTML(
-                    f'<p style="font-size:0.72rem;color:#64748b;margin-top:8px;">'
-                    f"API: {api_health()}</p>"
+                    f'<p style="font-size:0.72rem;color:#737373;margin-top:8px;">'
+                    f"API ({API_BASE}): {api_health()}</p>"
                 )
 
             with gr.Accordion(
@@ -633,10 +706,10 @@ def build():
                     "https://www.coactionspecialty.com/favicon.ico",
                 ),
                 placeholder=(
-                    '<div style="text-align:center;padding:12rem 1rem;color:#94a3b8;">'
-                    '<p style="font-size:1.1rem;font-weight:600;color:#1e293b;">'
+                    '<div style="text-align:center;padding:12rem 1rem;color:#a3a3a3;">'
+                    '<p style="font-size:1.05rem;font-weight:600;color:#171717;">'
                     "Coaction Binding Authority Assistant</p>"
-                    '<p style="font-size:0.82rem;">Ask about class codes, '
+                    '<p style="font-size:0.82rem;color:#525252;">Ask about class codes, '
                     "coverage options, or manual guidelines.</p></div>"
                 ),
             )
@@ -668,20 +741,38 @@ def build():
                 logout = gr.Button("Logout", scale=1, min_width=70)
 
         # ── Wiring ──
-        outs = [chatbot, session_state, fu1, fu2, fu3, sug_row, msg]
-        ins = [msg, chatbot, session_state, top_k, user_state]
+        # Step 1 outputs: chatbot, session_state, msg, fu1, fu2, fu3, sug_row
+        step1_outs = [chatbot, session_state, msg, fu1, fu2, fu3, sug_row]
+        step1_ins = [msg, chatbot, session_state, user_state]
 
-        # Send / Enter
-        send.click(respond, ins, outs).then(refresh_dropdown, [user_state], [history_dropdown])
-        msg.submit(respond, ins, outs).then(refresh_dropdown, [user_state], [history_dropdown])
+        # Step 2 outputs: chatbot, session_state, fu1, fu2, fu3, sug_row
+        step2_outs = [chatbot, session_state, fu1, fu2, fu3, sug_row]
+        step2_ins = [chatbot, session_state, top_k, user_state]
 
-        # Follow-ups
+        # Send / Enter — two-step chain for immediate user message display
+        send.click(add_user_message, step1_ins, step1_outs).then(
+            get_response, step2_ins, step2_outs
+        ).then(refresh_dropdown, [user_state], [history_dropdown])
+
+        msg.submit(add_user_message, step1_ins, step1_outs).then(
+            get_response, step2_ins, step2_outs
+        ).then(refresh_dropdown, [user_state], [history_dropdown])
+
+        # Follow-ups — same two-step chain for immediate message display
         for btn in (fu1, fu2, fu3):
-            btn.click(on_followup, [btn, chatbot, session_state, top_k, user_state], outs)
+            btn.click(lambda t: t, [btn], [msg]).then(
+                add_user_message, step1_ins, step1_outs
+            ).then(
+                get_response, step2_ins, step2_outs
+            )
 
         # Suggestion chips
         for sb in sug_btns:
-            sb.click(lambda t=sb.value: t, None, [msg]).then(respond, ins, outs)
+            sb.click(lambda t=sb.value: t, None, [msg]).then(
+                add_user_message, step1_ins, step1_outs
+            ).then(
+                get_response, step2_ins, step2_outs
+            )
 
         su_btn.click(signup_user, [su_name, su_email, su_password, su_role], [su_status]).then(
             lambda r: gr.update(visible=True) if "successful" in r else gr.update(visible=False),
@@ -780,18 +871,19 @@ def build():
 
 if __name__ == "__main__":
     ui = build()
+    api_port = int(os.getenv("API_PORT") or os.getenv("PORT", "8000"))
+
+    print(f"API base for UI callbacks: {API_BASE}")
 
     if fastapi_app:
-        print("🚀 Starting Unified Deployment (UI + API)...")
-        # Mount the UI onto the FastAPI app
-        # This makes the UI available at / and the API at /v1
+        print("Starting unified deployment (UI + API)...")
         gr.mount_gradio_app(fastapi_app, ui, path="/")
 
         import uvicorn
 
-        uvicorn.run(fastapi_app, host="0.0.0.0", port=8080)
+        uvicorn.run(fastapi_app, host="0.0.0.0", port=api_port)
     else:
-        print("🏃 Starting Standalone UI...")
+        print("Starting standalone UI (expects API on same host/port as API_BASE)...")
         ui.launch(
             server_name="0.0.0.0",
             server_port=7860,

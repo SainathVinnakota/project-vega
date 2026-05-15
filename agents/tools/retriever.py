@@ -150,6 +150,12 @@ def get_last_retrieval_sources() -> list[dict]:
     return list(_last_retrieval_sources)
 
 
+def clear_retrieval_sources() -> None:
+    """Clear stale retrieval sources before a new invocation."""
+    global _last_retrieval_sources
+    _last_retrieval_sources = []
+
+
 # ── Helper Functions ─────────────────────────────────────────────────────
 
 
