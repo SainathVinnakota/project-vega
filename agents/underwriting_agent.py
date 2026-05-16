@@ -34,9 +34,11 @@ class SafeBedrockModel(BedrockModel):
     """
 
     @staticmethod
-    def _strip_reasoning(messages: list[dict]) -> list[dict]:
+    def _strip_reasoning(messages: Any) -> list[Any]:
         """Remove reasoningContent blocks from message content arrays."""
-        cleaned = []
+        if not isinstance(messages, list):
+            return messages
+        cleaned: list[Any] = []
         for msg in messages:
             if not isinstance(msg, dict):
                 cleaned.append(msg)
@@ -53,10 +55,16 @@ class SafeBedrockModel(BedrockModel):
                 cleaned.append(msg)
         return cleaned
 
-    def format_request(self, messages: list[dict], tool_specs: list[dict] | None = None, system_prompt: str | None = None, **kwargs: Any) -> dict:
+    def _format_request(  # type: ignore[override]
+        self,
+        messages: Any,
+        tool_specs: Any = None,
+        system_prompt_content: Any = None,
+        tool_choice: Any = None,
+    ) -> dict[str, Any]:
         """Override to strip reasoning blocks before formatting the request."""
         clean_messages = self._strip_reasoning(messages)
-        return super().format_request(clean_messages, tool_specs, system_prompt, **kwargs)
+        return super()._format_request(clean_messages, tool_specs, system_prompt_content, tool_choice)
 
 
 def _normalize_question(text: str) -> str:
@@ -130,7 +138,7 @@ class UnderwritingAgent:
         # Build the messages list for history restoration.
         # Each message must be in Bedrock converse format:
         #   {"role": "user"|"assistant", "content": [{"text": "..."}]}
-        restored_messages = []
+        restored_messages: list[Any] = []
         if messages:
             for msg in messages:
                 if isinstance(msg, dict):
@@ -170,31 +178,6 @@ class UnderwritingAgent:
             messages=restored_messages if restored_messages else None,
         )
 
-    @staticmethod
-    def _strip_reasoning_from_messages(messages: list) -> list:
-        """Strip reasoningContent blocks from Bedrock messages.
-        
-        Some models (e.g. openai.gpt-oss-safeguard-120b) don't support
-        reasoningContent.reasoningText.signature. This removes those blocks
-        so they don't cause ValidationException on subsequent turns.
-        """
-        cleaned = []
-        for msg in messages:
-            if not isinstance(msg, dict):
-                cleaned.append(msg)
-                continue
-            content = msg.get("content")
-            if isinstance(content, list):
-                filtered_content = [
-                    block for block in content
-                    if not (isinstance(block, dict) and "reasoningContent" in block)
-                ]
-                if filtered_content:
-                    cleaned.append({**msg, "content": filtered_content})
-                # If all content was reasoning, skip this message entirely
-            else:
-                cleaned.append(msg)
-        return cleaned
 
     async def invoke(
         self,
