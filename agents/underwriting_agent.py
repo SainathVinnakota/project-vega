@@ -3,9 +3,11 @@
 
 import re
 import structlog
+from typing import Any
 
 from strands import Agent
 from strands.models.bedrock import BedrockModel
+from strands.agent.conversation_manager import NullConversationManager
 
 from domain.models import (
     ExecutionProfile,
@@ -16,9 +18,52 @@ from agents.tools.retriever import (
     search_manuals,
     configure_retriever,
     get_last_retrieval_sources,
+    clear_retrieval_sources,
 )
 
 logger = structlog.get_logger(__name__)
+
+
+class SafeBedrockModel(BedrockModel):
+    """BedrockModel wrapper that strips reasoningContent blocks.
+    
+    Some models (e.g. openai.gpt-oss-safeguard-120b) don't support the
+    reasoningContent.reasoningText.signature field. The strands SDK may inject
+    these blocks during multi-turn tool-call loops, causing ValidationException.
+    This subclass intercepts the converse call and strips them out.
+    """
+
+    @staticmethod
+    def _strip_reasoning(messages: Any) -> list[Any]:
+        """Remove reasoningContent blocks from message content arrays."""
+        if not isinstance(messages, list):
+            return messages
+        cleaned: list[Any] = []
+        for msg in messages:
+            if not isinstance(msg, dict):
+                cleaned.append(msg)
+                continue
+            content = msg.get("content")
+            if isinstance(content, list):
+                filtered = [
+                    block for block in content
+                    if not (isinstance(block, dict) and "reasoningContent" in block)
+                ]
+                if filtered:
+                    cleaned.append({**msg, "content": filtered})
+            else:
+                cleaned.append(msg)
+        return cleaned
+
+    def format_request(  # type: ignore[override]
+        self,
+        messages: Any,
+        tool_specs: Any = None,
+        system_prompt: Any = None,
+    ) -> dict[str, Any]:
+        """Override to strip reasoning blocks before formatting the request."""
+        clean_messages = self._strip_reasoning(messages)
+        return super().format_request(clean_messages, tool_specs, system_prompt)
 
 
 def _normalize_question(text: str) -> str:
@@ -71,11 +116,16 @@ class UnderwritingAgent:
             kb_ids=profile.retrieval_profile.knowledge_base_ids,
         )
 
-    def _build_agent(self, role: str) -> Agent:
-        """Build a Strands Agent for the given user role."""
+    def _build_agent(self, role: str, messages: list[dict] | None = None) -> Agent:
+        """Build a Strands Agent for the given user role.
+        
+        Args:
+            role: User role for prompt selection.
+            messages: Optional conversation history to pre-load.
+        """
         mp = self.profile.model_profile
 
-        model = BedrockModel(
+        model = SafeBedrockModel(
             model_id=mp.model_id,
             region_name=self.region,
             temperature=mp.temperature,
@@ -84,18 +134,49 @@ class UnderwritingAgent:
 
         prompt = get_prompt(self.profile.prompt_template_id, role)
 
+        # Build the messages list for history restoration.
+        # Each message must be in Bedrock converse format:
+        #   {"role": "user"|"assistant", "content": [{"text": "..."}]}
+        restored_messages: list[Any] = []
+        if messages:
+            for msg in messages:
+                if isinstance(msg, dict):
+                    msg_role = msg.get("role", "user")
+                    msg_content = msg.get("content", "")
+                    # Skip system messages — Bedrock doesn't accept them in messages array
+                    if msg_role == "system":
+                        continue
+                    # Normalize content to Bedrock converse format
+                    if isinstance(msg_content, str):
+                        restored_messages.append({
+                            "role": msg_role,
+                            "content": [{"text": msg_content}],
+                        })
+                    elif isinstance(msg_content, list):
+                        # Strip any reasoningContent blocks from content list
+                        clean_content = [
+                            block for block in msg_content
+                            if not (isinstance(block, dict) and "reasoningContent" in block)
+                        ]
+                        if clean_content:
+                            restored_messages.append({
+                                "role": msg_role,
+                                "content": clean_content,
+                            })
+                    else:
+                        restored_messages.append({
+                            "role": msg_role,
+                            "content": [{"text": str(msg_content)}],
+                        })
+
         return Agent(
             model=model,
             system_prompt=prompt,
             tools=[search_manuals],
+            conversation_manager=NullConversationManager(),
+            messages=restored_messages if restored_messages else None,
         )
 
-    def _get_or_create_agent(self, role: str) -> Agent:
-        """Get or create a cached agent for the given role."""
-        role_key = (role or "").strip().lower()
-        if role_key not in self._agents:
-            self._agents[role_key] = self._build_agent(role_key)
-        return self._agents[role_key]
 
     async def invoke(
         self,
@@ -104,28 +185,64 @@ class UnderwritingAgent:
         history: list[dict] | None = None,
     ) -> dict:
         """Invoke the agent with a query."""
-        agent = self._get_or_create_agent(role)
+        # Clear stale retrieval sources before each invocation
+        clear_retrieval_sources()
 
-        # Restore conversation history if provided
-        if history:
-            from strands.messages import Message
-
-            restored_messages = []
-            for msg in history:
-                if isinstance(msg, dict):
-                    restored_messages.append(
-                        Message(role=msg.get("role", "user"), content=msg.get("content", ""))
-                    )
-                else:
-                    restored_messages.append(msg)
-            agent.state.messages = restored_messages  # type: ignore
+        # Build a fresh agent with conversation history pre-loaded
+        agent = self._build_agent(role, messages=history)
 
         # Execute the agent (synchronous Strands call)
         response = agent(query)
-        answer = str(response)
+        raw_answer = str(response)
 
-        # Extract follow-up questions from the answer
-        follow_up_questions = []
+        # ─── STEP 1: Extract <used_sources> from the RAW answer ─────────
+        # This MUST happen first because follow-up extraction will strip
+        # the tail of the answer where <used_sources> lives.
+        retrieval_sources = get_last_retrieval_sources()
+        url_to_meta: dict[str, dict] = {}
+        for src in retrieval_sources:
+            url = (src.get("url") or "").strip().rstrip("/")
+            if url and url != "N/A":
+                url_to_meta[url] = src
+        all_urls = list(url_to_meta.keys())
+
+        used_sources_match = re.search(
+            r"<used_sources>\s*(.*?)\s*</used_sources>",
+            raw_answer, re.DOTALL | re.IGNORECASE,
+        )
+
+        cited_urls: list[str] = []
+        if used_sources_match:
+            raw_urls = used_sources_match.group(1).strip().split("\n")
+            for raw_url in raw_urls:
+                clean_url = raw_url.strip().rstrip("/")
+                if not clean_url:
+                    continue
+                if clean_url in url_to_meta:
+                    cited_urls.append(clean_url)
+                elif clean_url.startswith("https://bindingauthority.coactionspecialty.com/"):
+                    cited_urls.append(clean_url)
+                    logger.info("citation_accepted_without_retriever_match", url=clean_url)
+
+            # Remove the hidden block from the answer text
+            answer = re.sub(
+                r"<used_sources>.*?</used_sources>", "",
+                raw_answer, flags=re.DOTALL | re.IGNORECASE,
+            ).strip()
+        else:
+            # Fallback: look for inline URLs in the raw answer
+            cited_urls = [url for url in all_urls if url in raw_answer]
+            answer = raw_answer
+
+        logger.info(
+            "citation_resolution",
+            cited_count=len(cited_urls),
+            retriever_count=len(all_urls),
+            cited_urls=cited_urls,
+        )
+
+        # ─── STEP 2: Extract follow-up questions ────────────────────────
+        follow_up_questions: list[str] = []
         fu_pattern = r"(?i)\*{0,2}\s*You might also want to ask:?\s*\*{0,2}"
         if re.search(fu_pattern, answer):
             parts = re.split(fu_pattern, answer, maxsplit=1)
@@ -162,54 +279,57 @@ class UnderwritingAgent:
 
             answer = clean_answer
 
-        # Get source citations
-        retrieval_sources = get_last_retrieval_sources()
-        all_urls = [s["url"] for s in retrieval_sources if s.get("url") and s["url"] != "N/A"]
-        
-        # Parse the <used_sources> hidden XML block
-        used_sources_match = re.search(r"<used_sources>\s*(.*?)\s*</used_sources>", answer, re.DOTALL | re.IGNORECASE)
-        
-        cited_urls = []
-        if used_sources_match:
-            raw_urls = used_sources_match.group(1).strip().split("\n")
-            # Exact match against retrieved URLs to avoid hallucinated links
-            for raw_url in raw_urls:
-                clean_url = raw_url.strip()
-                if clean_url in all_urls:
-                    cited_urls.append(clean_url)
-            
-            # Remove the hidden block from the final answer text
-            answer = re.sub(r"<used_sources>.*?</used_sources>", "", answer, flags=re.DOTALL | re.IGNORECASE).strip()
-        else:
-            # Fallback if model fails to output XML: look for inline URLs
-            cited_urls = [url for url in all_urls if url in answer]
-            
-        # If still no citations, fallback to the top 3 retrieved (assuming they were implicitly used)
-        sources = cited_urls if cited_urls else all_urls[:3]
+        logger.info("follow_up_extraction", count=len(follow_up_questions), questions=follow_up_questions)
 
-        # Build citation objects
-        citations = []
-        seen_urls = set()
-        for src in retrieval_sources:
-            url = src.get("url", "")
-            if url in sources and url not in seen_urls:
-                seen_urls.add(url)
+        # ─── STEP 3: Build citation objects ──────────────────────────────
+        sources = cited_urls
+        citations: list[SourceCitation] = []
+        seen_urls: set[str] = set()
+
+        for url in sources:
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+            meta = url_to_meta.get(url)
+            if meta:
                 citations.append(
                     SourceCitation(
                         source_id=url,
-                        title=src.get("heading", "") or url,
+                        title=meta.get("heading", "") or url,
                         uri=url,
-                        manual_name=src.get("manual_name", ""),
+                        manual_name=meta.get("manual_name", ""),
+                    )
+                )
+            else:
+                # Build citation from URL pattern
+                filename = url.rstrip("/").split("/")[-1].replace(".html", "")
+                if filename.isdigit():
+                    title = f"Class Code {filename}"
+                    manual_name = "General Liability Manual"
+                elif filename == "guide":
+                    title = "Class Codes"
+                    manual_name = "General Liability Guide Manual"
+                elif "property" in filename.lower():
+                    title = filename.replace("-", " ").replace("_", " ").title()
+                    manual_name = "Property Manual"
+                else:
+                    title = filename.replace("-", " ").replace("_", " ").title()
+                    manual_name = "Binding Authority Manual"
+                citations.append(
+                    SourceCitation(
+                        source_id=url,
+                        title=title,
+                        uri=url,
+                        manual_name=manual_name,
                     )
                 )
 
-        # Get the current agent messages for session persistence
-        current_messages = agent.state.messages if hasattr(agent.state, "messages") else []
+        logger.info("citations_built", count=len(citations))
 
         return {
             "answer": answer,
             "citations": citations,
             "follow_up_questions": follow_up_questions,
             "sources": sources,
-            "agent_messages": current_messages,
         }
+
