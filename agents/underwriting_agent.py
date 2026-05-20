@@ -257,6 +257,9 @@ class UnderwritingAgent:
             cited_urls = [url for url in all_urls if url in raw_answer]
             answer = raw_answer
 
+        # Enforce maximum of 5 unique citations
+        cited_urls = cited_urls[:5]
+
         logger.info(
             "citation_resolution",
             cited_count=len(cited_urls),

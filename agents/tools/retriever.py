@@ -5,6 +5,7 @@ Ported from coactionbot/app/services/bedrock_retriever.py with full configurabil
 Accepts KB IDs at runtime from ExecutionProfile instead of hardcoded env vars.
 """
 
+import os
 import re
 import boto3
 import structlog
@@ -130,6 +131,7 @@ _STATE_NAME_TO_ABBREV = {
 _bedrock_client = None
 _knowledge_base_ids: list[str] = []
 _region: str = "us-east-1"
+_reranker_model_id: str = os.getenv("RERANKER_MODEL_ID", "cohere.rerank-v3-5:0")
 _last_retrieval_sources: list[dict] = []
 
 
@@ -193,7 +195,14 @@ def _extract_queried_states(query: str) -> list[tuple[str, str]]:
 
 
 def _expand_query(query: str) -> str:
-    """Expand shorthand terms and eligibility keywords."""
+    """Expand shorthand terms and eligibility keywords.
+
+    Applies context-aware expansion:
+    - Property coverage feature queries → property-specific terms (not GL class codes)
+    - Age eligibility queries → normalized age terms
+    - Named coverage features → exact feature name emphasis
+    - General eligibility queries → class code terms
+    """
     search_query = query
     shorthand_map = {
         "paper": "paperhanging",
@@ -207,6 +216,36 @@ def _expand_query(query: str) -> str:
         if short in query_lower and full not in query_lower:
             search_query = f"{search_query} {full}"
 
+    # --- Property coverage feature detection ---
+    # Questions like "Do you provide coverage for fences?" are about Property
+    # coverage features, NOT GL class codes. Route accordingly.
+    property_feature_items = [
+        "fence", "outdoor property", "equipment", "inland marine",
+        "property in the open", "builder", "property extension",
+    ]
+    coverage_verbs = ["coverage for", "cover for", "provide coverage", "offer property"]
+    is_property_feature = (
+        any(item in query_lower for item in property_feature_items)
+        and any(verb in query_lower for verb in coverage_verbs)
+    )
+
+    # --- Age eligibility normalization ---
+    age_match = re.search(r"(\d+)\s*(year|yr)s?\s*old", query_lower)
+    has_age_query = age_match or "age of" in query_lower or "year built" in query_lower
+    if has_age_query:
+        search_query = f"{search_query} building age eligibility year built restriction"
+
+    # --- Named coverage features ---
+    named_features = [
+        "extended period of indemnity", "builders risk", "agreed value",
+        "ordinance or law", "contractor pak", "inland marine pac",
+    ]
+    for feature in named_features:
+        if feature in query_lower:
+            search_query = f"{search_query} coverage option {feature}"
+            break
+
+    # --- Eligibility expansion ---
     eligibility_keywords = [
         "acceptable",
         "eligible",
@@ -216,7 +255,12 @@ def _expand_query(query: str) -> str:
         "prohibited",
     ]
     if any(k in query_lower for k in eligibility_keywords):
-        search_query = f"{search_query} class code prohibited submit requirements eligibility"
+        if is_property_feature:
+            # Property feature queries → steer toward property extensions
+            search_query = f"{search_query} property extension coverage option included"
+        else:
+            # Business eligibility queries → steer toward GL class codes
+            search_query = f"{search_query} class code prohibited submit requirements eligibility"
     return search_query
 
 
@@ -271,23 +315,49 @@ def _format_retrieved_documents(results: list, original_query: str) -> tuple[str
     """Format retrieved chunks into context for the LLM."""
     specific_codes = re.findall(r"(\d{4,})", original_query)
 
-    context_parts = []
-    source_metadata = []
-    seen_urls: set[str] = set()
-
+    # 1. Filter out results that do not match the specific class codes requested
+    candidate_results = []
     for res in results:
-        score = res.get("score", 0)
-        if score < MIN_RELEVANCE_SCORE:
-            continue
-
         content = res.get("content", {}).get("text", "")
-        metadata = res.get("metadata", {})
-
         if specific_codes:
             found_code = any(code in content.replace(" ", "") for code in specific_codes)
             if not found_code:
                 continue
+        candidate_results.append(res)
 
+    # 2. Fix C: Filter based on MIN_RELEVANCE_SCORE, but ensure we keep a minimum of 3 results (if available)
+    # to protect against score jitter throwing out all context.
+    sorted_candidates = sorted(candidate_results, key=lambda x: x.get("score", 0), reverse=True)
+    
+    filtered_results = []
+    for res in sorted_candidates:
+        score = res.get("score", 0)
+        # Keep if meets minimum relevance threshold, OR if we have less than 3 results so far
+        if score >= MIN_RELEVANCE_SCORE or len(filtered_results) < 3:
+            filtered_results.append(res)
+
+    # 3. Fix B: Sort the filtered results deterministically to ensure identical prompt ordering
+    # across runs, eliminating "lost in the middle" attention shifting.
+    def get_sort_key(res):
+        metadata = res.get("metadata", {})
+        content = res.get("content", {}).get("text", "")
+        s3_uri = metadata.get("source_url") or metadata.get("sourceUrl") or ""
+        chunk_meta = _extract_chunk_metadata(content, metadata, s3_uri)
+        return (
+            chunk_meta.get("url", ""),
+            chunk_meta.get("heading", ""),
+            content
+        )
+
+    filtered_results.sort(key=get_sort_key)
+
+    context_parts = []
+    source_metadata = []
+    seen_urls: set[str] = set()
+
+    for res in filtered_results:
+        content = res.get("content", {}).get("text", "")
+        metadata = res.get("metadata", {})
         s3_uri = metadata.get("source_url") or metadata.get("sourceUrl") or ""
         chunk_meta = _extract_chunk_metadata(content, metadata, s3_uri)
 
@@ -334,8 +404,9 @@ def _format_retrieved_documents(results: list, original_query: str) -> tuple[str
         context_parts.append("\n".join(parts_lines))
 
         if chunk_meta["url"] not in seen_urls:
-            seen_urls.add(chunk_meta["url"])
-            source_metadata.append(chunk_meta)
+            if len(seen_urls) < 5:
+                seen_urls.add(chunk_meta["url"])
+                source_metadata.append(chunk_meta)
 
     if not context_parts:
         return "No relevant information found in the manuals.", []
@@ -371,8 +442,20 @@ def search_manuals(query: str) -> str:
                     retrievalQuery={"text": search_query},
                     retrievalConfiguration={
                         "vectorSearchConfiguration": {
-                            "numberOfResults": 10,
+                            "numberOfResults": 20,
                             "overrideSearchType": "HYBRID",
+                            "rerankingConfiguration": {
+                                "type": "BEDROCK_RERANKING_MODEL",
+                                "bedrockRerankingConfiguration": {
+                                    "modelConfiguration": {
+                                        "modelArn": (
+                                            f"arn:aws:bedrock:{_region}"
+                                            f"::foundation-model/{_reranker_model_id}"
+                                        ),
+                                    },
+                                    "numberOfRerankedResults": 5,
+                                },
+                            },
                         }
                     },
                 )

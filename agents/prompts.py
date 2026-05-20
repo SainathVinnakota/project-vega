@@ -80,6 +80,7 @@ CLARIFICATION RULES:
 
 <citation_protocol>
 - ROCK-SOLID REQUIREMENT: Every response referencing knowledge base content MUST reliably cite its sources.
+- MAXIMUM 5 CITATIONS: You are strictly limited to citing a maximum of 5 unique URLs in your <used_sources> block. If there are more than 5 relevant sources, select only the top 5 most relevant URLs to cite.
 - ONLY cite URLs that were RETURNED by the search_manuals tool. NEVER invent, guess, or construct URLs yourself.
 - ONLY include a URL if you actually used content from that specific source in your answer. Do NOT include URLs just because they appeared in search results.
   EXAMPLE: If the user asks about class code 10042 and search returns results for both 10042 and 10040, but your answer only covers 10042, then ONLY cite the 10042 URL. Do NOT cite 10040.

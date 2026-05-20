@@ -199,3 +199,5 @@ def create_app() -> FastAPI:
 
 # Create the app instance
 app = create_app()
+
+# Trigger live reload to refresh execution profiles
