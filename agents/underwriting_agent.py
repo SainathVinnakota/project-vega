@@ -26,7 +26,7 @@ logger = structlog.get_logger(__name__)
 
 class SafeBedrockModel(BedrockModel):
     """BedrockModel wrapper that strips reasoningContent blocks.
-    
+
     Some models (e.g. openai.gpt-oss-safeguard-120b) don't support the
     reasoningContent.reasoningText.signature field. The strands SDK may inject
     these blocks during multi-turn tool-call loops, causing ValidationException.
@@ -35,7 +35,7 @@ class SafeBedrockModel(BedrockModel):
 
     @staticmethod
     def _strip_reasoning(messages: Any) -> list[Any]:
-        """Remove reasoningContent blocks from message content arrays."""
+        """Remove reasoningContent blocks and intermediate assistant text thoughts."""
         if not isinstance(messages, list):
             return messages
         cleaned: list[Any] = []
@@ -44,11 +44,20 @@ class SafeBedrockModel(BedrockModel):
                 cleaned.append(msg)
                 continue
             content = msg.get("content")
+            role = msg.get("role")
             if isinstance(content, list):
+                # 1. Filter out native reasoningContent blocks
                 filtered = [
-                    block for block in content
+                    block
+                    for block in content
                     if not (isinstance(block, dict) and "reasoningContent" in block)
                 ]
+                # 2. For assistant messages that contain a toolUse block,
+                # strip out any text blocks (model's intermediate thoughts/reasoning text)
+                if role == "assistant" and any(
+                    isinstance(b, dict) and "toolUse" in b for b in filtered
+                ):
+                    filtered = [b for b in filtered if not (isinstance(b, dict) and "text" in b)]
                 if filtered:
                     cleaned.append({**msg, "content": filtered})
             else:
@@ -118,7 +127,7 @@ class UnderwritingAgent:
 
     def _build_agent(self, role: str, messages: list[dict] | None = None) -> Agent:
         """Build a Strands Agent for the given user role.
-        
+
         Args:
             role: User role for prompt selection.
             messages: Optional conversation history to pre-load.
@@ -148,26 +157,33 @@ class UnderwritingAgent:
                         continue
                     # Normalize content to Bedrock converse format
                     if isinstance(msg_content, str):
-                        restored_messages.append({
-                            "role": msg_role,
-                            "content": [{"text": msg_content}],
-                        })
+                        restored_messages.append(
+                            {
+                                "role": msg_role,
+                                "content": [{"text": msg_content}],
+                            }
+                        )
                     elif isinstance(msg_content, list):
                         # Strip any reasoningContent blocks from content list
                         clean_content = [
-                            block for block in msg_content
+                            block
+                            for block in msg_content
                             if not (isinstance(block, dict) and "reasoningContent" in block)
                         ]
                         if clean_content:
-                            restored_messages.append({
-                                "role": msg_role,
-                                "content": clean_content,
-                            })
+                            restored_messages.append(
+                                {
+                                    "role": msg_role,
+                                    "content": clean_content,
+                                }
+                            )
                     else:
-                        restored_messages.append({
-                            "role": msg_role,
-                            "content": [{"text": str(msg_content)}],
-                        })
+                        restored_messages.append(
+                            {
+                                "role": msg_role,
+                                "content": [{"text": str(msg_content)}],
+                            }
+                        )
 
         return Agent(
             model=model,
@@ -176,7 +192,6 @@ class UnderwritingAgent:
             conversation_manager=NullConversationManager(),
             messages=restored_messages if restored_messages else None,
         )
-
 
     async def invoke(
         self,
@@ -203,12 +218,18 @@ class UnderwritingAgent:
         for src in retrieval_sources:
             url = (src.get("url") or "").strip().rstrip("/")
             if url and url != "N/A":
+                # Skip internal guideline sources from citation tracking
+                # (they should inform answers but NOT appear as clickable citations)
+                if src.get("manual_name") == "Internal Guidelines":
+                    logger.info("internal_source_excluded_from_citations", url=url)
+                    continue
                 url_to_meta[url] = src
         all_urls = list(url_to_meta.keys())
 
         used_sources_match = re.search(
             r"<used_sources>\s*(.*?)\s*</used_sources>",
-            raw_answer, re.DOTALL | re.IGNORECASE,
+            raw_answer,
+            re.DOTALL | re.IGNORECASE,
         )
 
         cited_urls: list[str] = []
@@ -226,8 +247,10 @@ class UnderwritingAgent:
 
             # Remove the hidden block from the answer text
             answer = re.sub(
-                r"<used_sources>.*?</used_sources>", "",
-                raw_answer, flags=re.DOTALL | re.IGNORECASE,
+                r"<used_sources>.*?</used_sources>",
+                "",
+                raw_answer,
+                flags=re.DOTALL | re.IGNORECASE,
             ).strip()
         else:
             # Fallback: look for inline URLs in the raw answer
@@ -279,7 +302,9 @@ class UnderwritingAgent:
 
             answer = clean_answer
 
-        logger.info("follow_up_extraction", count=len(follow_up_questions), questions=follow_up_questions)
+        logger.info(
+            "follow_up_extraction", count=len(follow_up_questions), questions=follow_up_questions
+        )
 
         # ─── STEP 3: Build citation objects ──────────────────────────────
         sources = cited_urls
@@ -332,4 +357,3 @@ class UnderwritingAgent:
             "follow_up_questions": follow_up_questions,
             "sources": sources,
         }
-

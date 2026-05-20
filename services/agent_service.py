@@ -39,20 +39,73 @@ class AgentService:
         self._profiles: dict[str, ExecutionProfile] = {}
 
     def _load_profile(self, agent_id: str) -> ExecutionProfile:
-        """Load an ExecutionProfile from DynamoDB or use defaults."""
+        """Load an ExecutionProfile using the standard resolution chain.
+
+        Resolution order (via ExecutionProfileRepository):
+        1. In-memory cache
+        2. DynamoDB (PROFILE#<agent_id> / VERSION#latest)
+        3. Disk scan — all JSON files in profiles/ matched by agent_id field
+        4. Environment variable fallback (safety net)
+        """
         if agent_id in self._profiles:
             return self._profiles[agent_id]
 
-        # Try to load from DynamoDB
-        stored = self.dynamodb.get_execution_profile(agent_id)
-        if stored and stored.get("profile"):
-            profile = ExecutionProfile(**stored["profile"])
-        else:
-            # Fallback to environment variables or defaults
-            kb_id = os.getenv("BEDROCK_KB_ID", "2KMBSFAGGS")
+        # Try ExecutionProfileRepository (DynamoDB → disk scan)
+        try:
+            from control_plane.execution_profile_repository import ExecutionProfileRepository
+
+            repo = ExecutionProfileRepository(dynamodb_adapter=self.dynamodb, config_dir="profiles")
+            # Use sync wrapper since _load_profile is called from sync context
+            import asyncio
+
+            try:
+                loop = asyncio.get_running_loop()
+                # If we're in an async context, create a task
+                import concurrent.futures
+
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    profile = loop.run_in_executor(
+                        pool, lambda: asyncio.run(repo.get_profile(agent_id))
+                    )
+                    # Can't easily await here from sync, fall through to sync path
+                    raise ValueError("Use sync path")
+            except RuntimeError:
+                # No running loop — safe to use asyncio.run
+                profile = asyncio.run(repo.get_profile(agent_id))
+
+            self._profiles[agent_id] = profile
+            return profile
+        except Exception as e:
+            logger.debug("profile_repo_fallback", agent_id=agent_id, reason=str(e))
+
+        # Fallback: try direct file load by filename
+        profile = None
+        import json
+        from pathlib import Path
+
+        profile_path = Path("profiles") / f"{agent_id}.json"
+        if profile_path.exists():
+            try:
+                raw = json.loads(profile_path.read_text())
+                profile = ExecutionProfile(**raw)
+                logger.info(
+                    "profile_loaded_from_file",
+                    agent_id=agent_id,
+                    path=str(profile_path),
+                )
+            except Exception as e:
+                logger.warning(
+                    "profile_file_parse_error",
+                    path=str(profile_path),
+                    error=str(e),
+                )
+
+        # Last resort: environment variables
+        if not profile:
+            kb_id_raw = os.getenv("BEDROCK_KB_ID", "2KMBSFAGGS")
+            kb_ids = [kid.strip() for kid in kb_id_raw.split(",") if kid.strip()]
             model_id = os.getenv("BEDROCK_MODEL_ID", "amazon.nova-pro-v1:0")
 
-            # Default profile for the underwriting agent
             profile = ExecutionProfile(
                 agent_id=agent_id,
                 version="1.0",
@@ -63,14 +116,14 @@ class AgentService:
                     max_tokens=4096,
                 ),
                 retrieval_profile=RetrievalProfile(
-                    knowledge_base_ids=[kb_id],
+                    knowledge_base_ids=kb_ids,
                 ),
                 memory_profile=MemoryProfile(),
             )
             logger.warning(
                 "using_default_profile",
                 agent_id=agent_id,
-                kb_id=kb_id,
+                kb_ids=kb_ids,
                 model_id=model_id,
                 msg="No stored profile found; using env/defaults.",
             )

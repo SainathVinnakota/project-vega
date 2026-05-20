@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 load_dotenv()
 
-from control_plane.kb_manager import KBManager  # noqa: E402
+from adapters.aws.bedrock_kb_manager import BedrockKBManager  # noqa: E402
 from control_plane.memory_manager import MemoryManager  # noqa: E402
 from control_plane.deployment_manager import DeploymentManager  # noqa: E402
 
@@ -32,7 +32,13 @@ def bootstrap_agent(agent_id, bucket_name, role_arn, region="us-east-1"):
     3. Update Agent JSON Profile (Persistent Config)
     4. Deploy/Update AgentCore Runtime
     """
-    kb_mgr = KBManager(region)
+    kb_mgr = BedrockKBManager(
+        region=region,
+        role_arn=role_arn,
+        embedding_model_arn="arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-embed-text-v2:0",
+    )
+    kb_mgr._rds_resource_arn = os.environ.get("RDS_RESOURCE_ARN", "")
+    kb_mgr._rds_credentials_secret_arn = os.environ.get("RDS_CREDENTIALS_SECRET_ARN", "")
     mem_mgr = MemoryManager(region)
     deploy_mgr = DeploymentManager(region)
 
@@ -60,38 +66,20 @@ def bootstrap_agent(agent_id, bucket_name, role_arn, region="us-east-1"):
 
         if not kb_id:
             logger.info("Creating new Knowledge Base...")
-            embedding_model = (
-                "arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-embed-text-v2:0"
-            )
-
-            # Use RDS (Aurora PostgreSQL with pgvector)
-            storage_config = {
-                "type": "RDS",
-                "rdsConfiguration": {
-                    "resourceArn": os.environ.get("RDS_CLUSTER_ARN"),
-                    "credentialsSecretArn": os.environ.get("RDS_SECRET_ARN"),
-                    "databaseName": os.environ.get("RDS_DB_NAME", "postgres"),
-                    "tableName": os.environ.get("RDS_TABLE_NAME", "bedrock_integration.bedrock_kb"),
-                    "fieldMapping": {
-                        "primaryKeyField": "id",
-                        "vectorField": "embedding",
-                        "textField": "chunks",
-                        "metadataField": "metadata",
-                    },
-                },
-            }
-
-            kb_id = kb_mgr.create_kb(
+            kb = kb_mgr.create_knowledge_base(
                 name=kb_name,
                 description=f"KB for {agent_id}",
-                role_arn=role_arn,
-                embedding_model_arn=embedding_model,
-                storage_config=storage_config,
+                rds_resource_arn=kb_mgr._rds_resource_arn,
+                rds_credentials_secret_arn=kb_mgr._rds_credentials_secret_arn,
             )
-            ds_id = kb_mgr.create_data_source(
-                kb_id, f"{agent_id}-s3", f"arn:aws:s3:::{bucket_name}"
+            kb_id = kb["knowledgeBaseId"]
+            ds = kb_mgr.add_s3_data_source(
+                kb_id=kb_id,
+                s3_bucket=bucket_name,
+                data_source_name=f"{agent_id}-s3",
             )
-            kb_mgr.start_ingestion(kb_id, ds_id)
+            ds_id = ds["dataSourceId"]
+            kb_mgr.sync_data_source(kb_id, ds_id)
         else:
             logger.info(f"Using existing KB: {kb_id}")
             # Ensure Data Source exists
@@ -99,8 +87,13 @@ def bootstrap_agent(agent_id, bucket_name, role_arn, region="us-east-1"):
             ds_id = kb_mgr.get_data_source_id(kb_id, ds_name)
             if not ds_id:
                 logger.info("Adding missing Data Source to existing KB...")
-                ds_id = kb_mgr.create_data_source(kb_id, ds_name, f"arn:aws:s3:::{bucket_name}")
-                kb_mgr.start_ingestion(kb_id, ds_id)
+                ds = kb_mgr.add_s3_data_source(
+                    kb_id=kb_id,
+                    s3_bucket=bucket_name,
+                    data_source_name=ds_name,
+                )
+                ds_id = ds["dataSourceId"]
+                kb_mgr.sync_data_source(kb_id, ds_id)
 
         # --- 2. AgentCore Memory ---
         # Note: AWS AgentCore Memory regex constraint only allows alphanumeric and underscores: [a-zA-Z][a-zA-Z0-9_]{0,47}

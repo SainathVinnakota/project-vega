@@ -1,17 +1,19 @@
+# ruff: noqa: E402
 # app/main.py
 """FastAPI application entry point for the Coaction Agent Platform.
 
 Wires all layers per HLD:
 - Boto3SessionFactory (centralized AWS client creation)
-- RuntimeOrchestrator (standard execution pipeline)
-- Control plane (agent registry, execution profiles)
-- Services (authorization, guardrails, memory, model gateway, tool gateway, telemetry, audit)
+- AgentService (core agent invocation pipeline)
 - Middleware (correlation ID, error handling)
 - Routers (auth, sessions, knowledge bases, agent invoke)
 - Gradio UI (unified deployment)
 """
 
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 import structlog
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
@@ -21,28 +23,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from domain.models import AgentInvocationRequest, IdentityContext
 
 # AWS Adapters
-from adapters.aws.boto3_factory import Boto3SessionFactory
 from adapters.aws.cognito import CognitoAdapter, CognitoConfig
 from adapters.aws.dynamodb import DynamoDBAdapter
 from adapters.aws.bedrock_kb_manager import BedrockKBManager
 
-# Control Plane
-from control_plane.agent_registry import AgentRegistryRepository
-from control_plane.execution_profile_repository import ExecutionProfileRepository
-
 # Services
-from services.authorization import AuthorizationService
-from services.guardrails import GuardrailService
-from services.memory import AgentCoreMemoryProvider
-from services.model_gateway import BedrockModelGateway
-from services.tool_gateway import AgentCoreReadOnlyToolGateway
-from services.telemetry import CloudWatchTelemetryEmitter
-from services.audit import MetadataOnlyAuditLogger
 from services.agent_service import AgentService
-
-# Runtime
-from runtime.orchestrator import RuntimeOrchestrator
-from runtime.response_composer import ResponseComposer
 
 # Identity
 from app.dependencies.identity import init_jwt_verifier
@@ -85,7 +71,7 @@ async def lifespan(app: FastAPI):
     rds_credentials_secret_arn = _env("RDS_CREDENTIALS_SECRET_ARN")
 
     # ── Step 1: Boto3 Client Factory (HLD §15) ──
-    boto3_factory = Boto3SessionFactory(region_name=region)
+    # (Boto3 session factory is handled via services container on demand)
 
     # ── Step 2: Cognito Auth ──
     cognito_adapter = None
@@ -104,38 +90,10 @@ async def lifespan(app: FastAPI):
     # ── Step 3: DynamoDB ──
     dynamodb_adapter = DynamoDBAdapter(table_name=dynamodb_table, region=region)
 
-    # ── Step 4: Control Plane Repositories (HLD §5) ──
-    agent_registry = AgentRegistryRepository(dynamodb_adapter=dynamodb_adapter)  # noqa: F841
-    execution_profile_repo = ExecutionProfileRepository(dynamodb_adapter=dynamodb_adapter, config_dir="profiles")
-
-    # ── Step 5: Services (HLD §8, §9, §12) ──
-    authorization = AuthorizationService()
-    guardrails = GuardrailService(boto3_factory=boto3_factory)
-    memory = AgentCoreMemoryProvider(dynamodb_adapter=dynamodb_adapter, boto3_factory=boto3_factory)
-    model_gateway = BedrockModelGateway(region=region)
-    tool_gateway = AgentCoreReadOnlyToolGateway(boto3_factory=boto3_factory)
-    response_composer = ResponseComposer()
-    telemetry = CloudWatchTelemetryEmitter(boto3_factory=boto3_factory)
-    audit = MetadataOnlyAuditLogger()
-
-    # ── Step 6: Runtime Orchestrator (HLD §8) ──
-    RuntimeOrchestrator(  # noqa: F841
-        profile_repo=execution_profile_repo,
-        authorization=authorization,
-        guardrails=guardrails,
-        retriever=None,
-        memory=memory,
-        model_gateway=model_gateway,
-        tool_gateway=tool_gateway,
-        response_composer=response_composer,
-        telemetry=telemetry,
-        audit=audit,
-    )
-
-    # ── Step 7: Agent Service ──
+    # ── Step 4: Agent Service (core invocation pipeline) ──
     agent_service = AgentService(dynamodb=dynamodb_adapter, region=region)
 
-    # ── Step 8: Bedrock KB Manager ──
+    # ── Step 5: Bedrock KB Manager ──
     kb_manager = BedrockKBManager(
         region=region,
         role_arn=kb_role_arn,
@@ -144,10 +102,10 @@ async def lifespan(app: FastAPI):
     kb_manager._rds_resource_arn = rds_resource_arn
     kb_manager._rds_credentials_secret_arn = rds_credentials_secret_arn
 
-    # Store in app state for root handler access
+    # Store in app state for AgentCore invocation handlers
     app.state.agent_service = agent_service
 
-    # ── Step 9: Wire Routers ──
+    # ── Step 6: Wire Routers ──
     init_auth_router(cognito_adapter, dynamodb_adapter)
     init_session_router(dynamodb_adapter)
     init_kb_router(kb_manager, dynamodb_adapter)
@@ -158,6 +116,29 @@ async def lifespan(app: FastAPI):
     yield  # Application runs
 
     logger.info("app_shutting_down")
+
+
+async def _handle_agentcore_invoke(request: Request) -> dict:
+    """Shared handler for AgentCore invocation paths (POST / and POST /invocations)."""
+    payload = await request.json()
+    input_text = payload.get("input_text") or payload.get("prompt")
+    if not input_text:
+        return {"status": "error", "answer": "Missing 'input_text' or 'prompt' in payload."}
+
+    invocation = AgentInvocationRequest(
+        agent_id="coaction-underwriting",
+        input_text=input_text,
+        session_id=payload.get("session_id"),
+    )
+    identity = IdentityContext(
+        user_id="agentcore-system",
+        roles=["agent"],
+        channel="agentcore",
+        correlation_id=getattr(request.state, "correlation_id", "agentcore-invoke"),
+    )
+
+    service = request.app.state.agent_service
+    return await service.invoke(invocation, identity)
 
 
 def create_app() -> FastAPI:
@@ -195,48 +176,12 @@ def create_app() -> FastAPI:
     @app.post("/invocations")
     async def invocations_root(request: Request):
         """Standard AgentCore invocation path."""
-        payload = await request.json()
-        input_text = payload.get("input_text") or payload.get("prompt")
-        if not input_text:
-            return {"status": "error", "answer": "Missing 'input_text' or 'prompt' in payload."}
-
-        invocation = AgentInvocationRequest(
-            agent_id="coaction-underwriting",
-            input_text=input_text,
-            session_id=payload.get("session_id"),
-        )
-        identity = IdentityContext(
-            user_id="agentcore-system",
-            roles=["agent"],
-            channel="agentcore",
-            correlation_id=getattr(request.state, "correlation_id", "agentcore-invoke"),
-        )
-
-        service = request.app.state.agent_service
-        return await service.invoke(invocation, identity)
+        return await _handle_agentcore_invoke(request)
 
     @app.post("/")
     async def root_invoke(request: Request):
         """Root handler for direct Bedrock AgentCore invocations."""
-        payload = await request.json()
-        input_text = payload.get("input_text") or payload.get("prompt")
-        if not input_text:
-            return {"status": "error", "answer": "Missing 'input_text' or 'prompt' in payload."}
-
-        invocation = AgentInvocationRequest(
-            agent_id="coaction-underwriting",
-            input_text=input_text,
-            session_id=payload.get("session_id"),
-        )
-        identity = IdentityContext(
-            user_id="agentcore-system",
-            roles=["agent"],
-            channel="agentcore",
-            correlation_id=getattr(request.state, "correlation_id", "agentcore-root"),
-        )
-
-        service = request.app.state.agent_service
-        return await service.invoke(invocation, identity)
+        return await _handle_agentcore_invoke(request)
 
     # ── Mount Gradio UI ──
     try:

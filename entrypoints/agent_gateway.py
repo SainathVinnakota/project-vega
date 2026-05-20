@@ -25,7 +25,7 @@ logger = logging.getLogger("agent_gateway")
 
 load_dotenv()
 
-AGENT_ID = os.environ.get("AGENT_ID", "vega_binding_authority_bot")
+AGENT_ID = os.environ.get("AGENT_ID", "coaction-underwriting")
 
 app = BedrockAgentCoreApp()
 
