@@ -25,6 +25,11 @@ logger = logging.getLogger("agent_gateway")
 
 load_dotenv()
 
+# Purge empty string environment variables to prevent client libraries from throwing credential errors
+for _k, _v in list(os.environ.items()):
+    if _v == "":
+        os.environ.pop(_k, None)
+
 AGENT_ID = os.environ.get("AGENT_ID", "coaction-underwriting")
 
 app = BedrockAgentCoreApp()

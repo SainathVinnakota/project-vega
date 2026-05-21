@@ -116,6 +116,7 @@ class UnderwritingAgent:
         configure_retriever(
             knowledge_base_ids=profile.retrieval_profile.knowledge_base_ids,
             region=region,
+            reranking_enabled=profile.retrieval_profile.reranking_enabled,
         )
 
         logger.info(
@@ -125,21 +126,46 @@ class UnderwritingAgent:
             kb_ids=profile.retrieval_profile.knowledge_base_ids,
         )
 
-    def _build_agent(self, role: str, messages: list[dict] | None = None) -> Agent:
+    def _build_agent(
+        self, role: str, messages: list[dict] | None = None, model_id: str | None = None
+    ) -> Agent:
         """Build a Strands Agent for the given user role.
 
         Args:
             role: User role for prompt selection.
             messages: Optional conversation history to pre-load.
+            model_id: Optional model_id override.
         """
         mp = self.profile.model_profile
+        effective_model_id = model_id or mp.model_id
 
-        model = SafeBedrockModel(
-            model_id=mp.model_id,
-            region_name=self.region,
-            temperature=mp.temperature,
-            max_tokens=mp.max_tokens or 4096,
-        )
+        if effective_model_id.startswith("gpt-"):
+            from strands.models.openai import OpenAIModel
+            import os
+
+            openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
+            if not openai_key:
+                raise ValueError(
+                    f"OpenAI model '{effective_model_id}' was selected but no OPENAI_API_KEY is configured. "
+                    "Please set a valid OPENAI_API_KEY in your .env file or environment variables, "
+                    "or choose a Bedrock model (e.g. Amazon Nova Pro) instead."
+                )
+
+            model = OpenAIModel(
+                model_id=effective_model_id,
+                client_args={"api_key": openai_key},
+                params={
+                    "temperature": mp.temperature,
+                    "max_tokens": mp.max_tokens or 4096,
+                },
+            )
+        else:
+            model = SafeBedrockModel(
+                model_id=effective_model_id,
+                region_name=self.region,
+                temperature=mp.temperature,
+                max_tokens=mp.max_tokens or 4096,
+            )
 
         prompt = get_prompt(self.profile.prompt_template_id, role)
 
@@ -198,13 +224,14 @@ class UnderwritingAgent:
         query: str,
         role: str = "agent",
         history: list[dict] | None = None,
+        model_id: str | None = None,
     ) -> dict:
         """Invoke the agent with a query."""
         # Clear stale retrieval sources before each invocation
         clear_retrieval_sources()
 
         # Build a fresh agent with conversation history pre-loaded
-        agent = self._build_agent(role, messages=history)
+        agent = self._build_agent(role, messages=history, model_id=model_id)
 
         # Execute the agent (synchronous Strands call)
         response = agent(query)
@@ -215,7 +242,10 @@ class UnderwritingAgent:
         # the tail of the answer where <used_sources> lives.
         retrieval_sources = get_last_retrieval_sources()
         url_to_meta: dict[str, dict] = {}
+        retrieved_internal_guidelines = False
         for src in retrieval_sources:
+            if src.get("manual_name") == "Internal Guidelines":
+                retrieved_internal_guidelines = True
             url = (src.get("url") or "").strip().rstrip("/")
             if url and url != "N/A":
                 # Skip internal guideline sources from citation tracking
@@ -233,6 +263,7 @@ class UnderwritingAgent:
         )
 
         cited_urls: list[str] = []
+        has_explicit_sources_tag = bool(used_sources_match)
         if used_sources_match:
             raw_urls = used_sources_match.group(1).strip().split("\n")
             for raw_url in raw_urls:
@@ -256,6 +287,19 @@ class UnderwritingAgent:
             # Fallback: look for inline URLs in the raw answer
             cited_urls = [url for url in all_urls if url in raw_answer]
             answer = raw_answer
+
+        # If still no citations were extracted (meaning NO <used_sources> tag was in the LLM response at all),
+        # but the retriever did return sources, fall back to the top 3 retrieved sources.
+        # However, do NOT apply the fallback if we retrieved internal guidelines, as those are confidential
+        # and should not have public manuals forcefully attached as unrelated fallback citations.
+        if (
+            not has_explicit_sources_tag
+            and not cited_urls
+            and all_urls
+            and not retrieved_internal_guidelines
+        ):
+            cited_urls = all_urls[:3]
+            logger.info("citation_fallback_to_top_retrieved_sources", urls=cited_urls)
 
         # Enforce maximum of 5 unique citations
         cited_urls = cited_urls[:5]

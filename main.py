@@ -1,9 +1,12 @@
-# main.py
-"""Entry point for the Coaction Agent Platform."""
-
+import os
 from dotenv import load_dotenv
 
 load_dotenv()  # Load .env before anything else
+
+# Purge empty string environment variables to prevent client libraries from throwing credential errors
+for _k, _v in list(os.environ.items()):
+    if _v == "":
+        os.environ.pop(_k, None)
 
 import uvicorn  # noqa: E402
 

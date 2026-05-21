@@ -181,11 +181,15 @@ class AgentService:
                 history = session_data.get("messages", [])
                 logger.info("session_history_loaded", count=len(history))
 
+            # Extract model ID override from metadata
+            model_id_override = request.request_metadata.get("model_id")
+
             # Execute the agent
             result = await agent.invoke(
                 query=request.input_text,
                 role=role,
                 history=history,
+                model_id=model_id_override,
             )
 
             # Build updated messages list for session persistence
@@ -218,7 +222,7 @@ class AgentService:
                 citations=result.get("citations", []),
                 session_id=session_id,
                 correlation_id=identity.correlation_id,
-                model_id=agent.profile.model_profile.model_id,
+                model_id=model_id_override or agent.profile.model_profile.model_id,
                 metadata={
                     "follow_up_questions": result.get("follow_up_questions", []),
                     "sources": result.get("sources", []),

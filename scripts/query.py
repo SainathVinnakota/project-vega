@@ -21,10 +21,10 @@ import argparse
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Reconfigure stdout/stderr to UTF-8 for Windows compatibility
-sys.stdout.reconfigure(encoding='utf-8')
-sys.stderr.reconfigure(encoding='utf-8')
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
 
-from dotenv import load_dotenv
+from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv()
 
@@ -40,7 +40,7 @@ async def invoke_agent(query: str, session_id: str, role: str) -> dict:
         profile_data = json.load(f)
 
     profile = ExecutionProfile.model_validate(profile_data)
-    
+
     # Allow override from env if present
     region = os.environ.get("AWS_REGION", "us-east-1")
     if os.environ.get("BEDROCK_MODEL_ID"):
@@ -78,12 +78,15 @@ async def main():
     args = parser.parse_args()
 
     import json
+
     session_id = args.session_id or str(uuid.uuid4())
-    
+
     with open("profiles/coaction-underwriting.json", "r", encoding="utf-8") as f:
         profile_data = json.load(f)
-    
-    model_id = os.environ.get("BEDROCK_MODEL_ID") or profile_data.get("model_profile", {}).get("model_id", "amazon.nova-pro-v1:0")
+
+    model_id = os.environ.get("BEDROCK_MODEL_ID") or profile_data.get("model_profile", {}).get(
+        "model_id", "amazon.nova-pro-v1:0"
+    )
     kb_ids = profile_data.get("retrieval_profile", {}).get("knowledge_base_ids", [])
     kb_id = ", ".join(kb_ids) if kb_ids else "None"
 

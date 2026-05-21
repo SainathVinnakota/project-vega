@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, type Dispatch, type SetStateAction } from 'react'
+import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react'
 import { ChatMessage, CoactionAssistantAvatar } from './ChatMessage'
 import { ChatInput } from './ChatInput'
 import { getRtkErrorMessage } from '../../lib/apiError'
@@ -44,6 +44,8 @@ export function ChatPanel({
   const [invokeAgent, { isLoading }] = useInvokeAgentMutation()
   const scrollRef = useRef<HTMLDivElement>(null)
 
+  const [selectedModel, setSelectedModel] = useState('amazon.nova-pro-v1:0')
+
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
   }, [messages, isLoading])
@@ -67,6 +69,7 @@ export function ChatPanel({
             input_text: text,
             session_id: activeSession,
             top_k: 5,
+            model_id: selectedModel,
           },
         }).unwrap()
 
@@ -88,11 +91,30 @@ export function ChatPanel({
         setMessages((prev) => [...prev, assistantMsg])
       }
     },
-    [invokeAgent, sessionId, setSessionId, setMessages, setFollowUps],
+    [invokeAgent, sessionId, setSessionId, setMessages, setFollowUps, selectedModel],
   )
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-neutral-50">
+      {/* Model Selection Header */}
+      <div className="flex shrink-0 items-center justify-between border-b border-neutral-200 bg-white px-4 py-2.5 shadow-sm">
+        <span className="text-xs font-semibold uppercase tracking-wide text-neutral-500">Underwriting Assistant</span>
+        <div className="flex items-center gap-2">
+          <label htmlFor="model-select" className="text-xs text-neutral-600 font-medium">Model:</label>
+          <select
+            id="model-select"
+            className="rounded border border-neutral-200 bg-white px-2 py-1 text-xs text-neutral-800 shadow-sm focus:border-neutral-500 focus:outline-none focus:ring-1 focus:ring-neutral-500"
+            value={selectedModel}
+            onChange={(e) => setSelectedModel(e.target.value)}
+          >
+            <option value="amazon.nova-pro-v1:0">Amazon Nova Pro</option>
+            <option value="amazon.nova-lite-v1:0">Amazon Nova Lite</option>
+            <option value="us.anthropic.claude-3-5-sonnet-20241022-v2:0">Claude 3.5 Sonnet</option>
+            <option value="gpt-4o">GPT-4o (OpenAI)</option>
+            <option value="gpt-4o-mini">GPT-4o-mini (OpenAI)</option>
+          </select>
+        </div>
+      </div>
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
         <div className="flex flex-col gap-4">
           {messages.length === 0 && !isLoading ? (

@@ -19,6 +19,7 @@ export interface AgentInvokeRequest {
   input_text: string
   session_id?: string | null
   top_k?: number
+  model_id?: string | null
 }
 
 export interface AgentInvokeResponse {

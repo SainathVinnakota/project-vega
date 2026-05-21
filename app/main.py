@@ -14,6 +14,12 @@ import os
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Purge empty string environment variables to prevent client libraries from throwing credential errors
+for _k, _v in list(os.environ.items()):
+    if _v == "":
+        os.environ.pop(_k, None)
+
 import structlog
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
@@ -194,10 +200,40 @@ def create_app() -> FastAPI:
     except Exception as e:
         logger.warning("gradio_ui_not_mounted", error=str(e))
 
+    # ── Mount React Frontend SPA (Production fallback) ──
+    frontend_dist = os.path.abspath(
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend", "dist")
+    )
+    if os.path.exists(frontend_dist):
+        from fastapi.staticfiles import StaticFiles
+        from fastapi.responses import FileResponse
+
+        assets_dir = os.path.join(frontend_dist, "assets")
+        if os.path.exists(assets_dir):
+            app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+        @app.get("/{fallback_path:path}")
+        async def frontend_fallback(fallback_path: str):
+            # Allow API, Gradio, and Health check routes to pass through
+            if (
+                fallback_path.startswith("v1/")
+                or fallback_path == "v1"
+                or fallback_path.startswith("ui/")
+                or fallback_path == "ui"
+                or fallback_path == "health"
+                or fallback_path == "invocations"
+            ):
+                from fastapi import HTTPException
+
+                raise HTTPException(status_code=404, detail="Not Found")
+            return FileResponse(os.path.join(frontend_dist, "index.html"))
+
+        logger.info("react_frontend_mounted", path=frontend_dist)
+
     return app
 
 
 # Create the app instance
 app = create_app()
 
-# Trigger live reload to refresh execution profiles
+# Trigger live reload for dynamic model selection routing
