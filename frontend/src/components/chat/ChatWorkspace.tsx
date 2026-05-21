@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } from 'react'
+import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react'
 
 import { useNavigate, useParams } from 'react-router-dom'
 
@@ -70,11 +70,15 @@ export function ChatWorkspace() {
 
   const [skipServerSync, setSkipServerSync] = useState(false)
 
+  const locallyGeneratedSessionIdRef = useRef<string | null>(null)
+
 
 
   const { data: sessionDetail, isError: sessionLoadError } = useGetSessionQuery(sessionId, {
 
     skip: !sessionId || skipServerSync,
+
+    refetchOnMountOrArgChange: true,
 
   })
 
@@ -90,6 +94,8 @@ export function ChatWorkspace() {
 
       setSkipServerSync(true)
 
+      locallyGeneratedSessionIdRef.current = next
+
       navigate(chatPath(next), { replace: !sessionId })
 
     },
@@ -101,8 +107,6 @@ export function ChatWorkspace() {
 
 
   const handleNewChat = useCallback(() => {
-
-    setSkipServerSync(true)
 
     setMessages([])
 
@@ -132,13 +136,29 @@ export function ChatWorkspace() {
 
   useEffect(() => {
 
-    if (!sessionId) {
+    if (sessionId) {
+
+      if (sessionId === locallyGeneratedSessionIdRef.current) {
+
+        // Keep skipServerSync as true since it's locally managed
+
+      } else {
+
+        setSkipServerSync(false)
+
+        locallyGeneratedSessionIdRef.current = null
+
+      }
+
+    } else {
 
       setMessages([])
 
       setFollowUps([])
 
       setSkipServerSync(false)
+
+      locallyGeneratedSessionIdRef.current = null
 
     }
 
@@ -231,5 +251,3 @@ export function ChatWorkspace() {
   )
 
 }
-
-

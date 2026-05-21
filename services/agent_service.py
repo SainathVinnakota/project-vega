@@ -195,7 +195,21 @@ class AgentService:
             # Build updated messages list for session persistence
             updated_messages = list(history)
             updated_messages.append({"role": "user", "content": request.input_text})
-            updated_messages.append({"role": "assistant", "content": result["answer"]})
+
+            # Persist citations alongside the answer so they survive session reloads.
+            # The frontend's buildAssistantContent() only fires on live responses;
+            # when a session is loaded from DynamoDB, citations must already be in the text.
+            persisted_answer = result["answer"]
+            citations = result.get("citations", [])
+            if citations:
+                persisted_answer += "\n\nSources:\n"
+                for c in citations:
+                    manual = getattr(c, "manual_name", None) or "Binding Authority Manual"
+                    title = getattr(c, "title", None) or getattr(c, "source_id", "Source")
+                    uri = getattr(c, "uri", None) or "#"
+                    persisted_answer += f"\nSource Manual: {manual}\nSection: {title}\nLink: {uri}\n"
+
+            updated_messages.append({"role": "assistant", "content": persisted_answer})
 
             # Generate session title from first user message
             title = (
