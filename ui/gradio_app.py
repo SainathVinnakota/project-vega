@@ -16,7 +16,7 @@ try:
 except ImportError:
     fastapi_app = None
 
-ALLOWED_ROLES = ("agent", "underwriter", "external")
+ALLOWED_ROLES = ("user",)
 
 
 def resolve_api_base() -> str:
@@ -46,7 +46,9 @@ def api_error_detail(response: requests.Response) -> str:
         for item in detail:
             if isinstance(item, dict):
                 loc = ".".join(str(x) for x in item.get("loc", ()))
-                parts.append(f"{loc}: {item.get('msg', item)}" if loc else str(item.get("msg", item)))
+                parts.append(
+                    f"{loc}: {item.get('msg', item)}" if loc else str(item.get("msg", item))
+                )
             else:
                 parts.append(str(item))
         return "; ".join(parts) if parts else str(detail)
@@ -507,11 +509,11 @@ SUGGESTIONS = []
 
 def add_user_message(message, history, session_id, user_state):
     """Step 1: Immediately show user message.
-    
+
     This runs instantly before the API call, so the user sees their
     message on the right side without delay. Gradio's built-in loading
     spinner handles the waiting indicator.
-    
+
     IMPORTANT: This function must NOT output to fu1/fu2/fu3/sug_row.
     In Gradio 6.14, if step1 and step2 both write to the same components
     in a .then() chain, the second write gets silently dropped.
@@ -535,7 +537,7 @@ def add_user_message(message, history, session_id, user_state):
 
 def get_response(history, session_id, top_k, user_state):
     """Step 2: Make API call and update the assistant response.
-    
+
     Called after add_user_message, so the user message is already visible.
     """
     if not history or len(history) < 1:
@@ -675,7 +677,7 @@ def build():
                 su_name = gr.Textbox(label="Name")
                 su_email = gr.Textbox(label="Email")
                 su_password = gr.Textbox(label="Password", type="password")
-                su_role = gr.Dropdown(list(ALLOWED_ROLES), value="agent", label="Role")
+                su_role = gr.Textbox(value="user", visible=False)
                 su_btn = gr.Button("Create account", variant="primary")
                 su_status = gr.Markdown("")
 
@@ -761,9 +763,7 @@ def build():
 
         # Follow-ups — same two-step chain for immediate message display
         for btn in (fu1, fu2, fu3):
-            btn.click(lambda t: t, [btn], [msg]).then(
-                add_user_message, step1_ins, step1_outs
-            ).then(
+            btn.click(lambda t: t, [btn], [msg]).then(add_user_message, step1_ins, step1_outs).then(
                 get_response, step2_ins, step2_outs
             )
 
@@ -771,9 +771,7 @@ def build():
         for sb in sug_btns:
             sb.click(lambda t=sb.value: t, None, [msg]).then(
                 add_user_message, step1_ins, step1_outs
-            ).then(
-                get_response, step2_ins, step2_outs
-            )
+            ).then(get_response, step2_ins, step2_outs)
 
         su_btn.click(signup_user, [su_name, su_email, su_password, su_role], [su_status]).then(
             lambda r: gr.Column(visible=True) if "successful" in r else gr.Column(visible=False),

@@ -32,6 +32,7 @@ class InvokeRequest(BaseModel):
     input_text: str
     session_id: str | None = None
     top_k: int = 5
+    model_id: str | None = None
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────
@@ -55,10 +56,27 @@ async def invoke_agent(
         agent_id=agent_id,
         input_text=req.input_text,
         session_id=req.session_id,
+        request_metadata={"model_id": req.model_id} if req.model_id else {},
     )
 
     response = await _agent_service.invoke(invocation, identity)
     return response
+
+
+@router.post("/{agent_id}/reload")
+async def reload_agent(agent_id: str):
+    """Force-reload an agent's execution profile from DynamoDB.
+
+    Use this after updating the profile in DynamoDB (e.g., adding a new
+    Knowledge Base ID) so the running server picks up the change without
+    a full restart.
+    """
+    if not _agent_service:
+        raise HTTPException(status_code=503, detail="Agent service not initialized")
+
+    _agent_service.reload_agent(agent_id)
+    logger.info("agent_reload_requested", agent_id=agent_id)
+    return {"status": "reloaded", "agent_id": agent_id}
 
 
 @router.get("/{agent_id}/health")

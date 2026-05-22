@@ -90,7 +90,6 @@ query → build/cache Strands Agent → restore history → execute →
 | `authorization.py` | `AuthorizationService` | Checks identity has user_id, validates tool-level role restrictions |
 | `guardrails.py` | `GuardrailService` | Calls Bedrock Guardrails API for input/output content filtering |
 | `memory.py` | `AgentCoreMemoryProvider` | Reads/writes DynamoDB sessions as memory context |
-| `model_gateway.py` | `BedrockModelGateway` | Builds Strands Agents from ExecutionProfiles, invokes, returns structured results |
 | `telemetry.py` | `CloudWatchTelemetryEmitter` | Emits invocation metrics to CloudWatch |
 | `audit.py` | `MetadataOnlyAuditLogger` | Structured audit logging (no raw prompts/responses) |
 | `tool_gateway.py` | `AgentCoreReadOnlyToolGateway` | Validates tool permissions; blocks non-read actions |
@@ -111,12 +110,7 @@ async def invoke(request, identity):
 
 | File | Class | Purpose |
 |------|-------|---------|
-| `orchestrator.py` | `RuntimeOrchestrator` | 12-step pipeline: authorize → guardrails → memory → model → tools → compose → audit |
-| `base_agent.py` | `BaseAgent` | Abstract base class, delegates to orchestrator |
-| `strands_agent.py` | `StrandsBaseAgent`, `RetrievalAgent`, `ReadOnlyToolAgent` | Agent type definitions |
-| `response_composer.py` | `ResponseComposer` | Assembles final `AgentInvocationResponse` from model results |
-| `host_adapter.py` | `RuntimeHostAdapter` | Abstracts hosting: `LocalFastApiRuntimeHost` vs `AgentCoreRuntimeHost` |
-| `context_builder.py` | (various) | Builds execution context from request + profile |
+| `orchestrator.py` | `RuntimeOrchestrator` | Standard execution sequence for cloud (AgentCore) invocations. Wraps `AgentService` with cross-cutting concerns (authorize → guardrails input → AgentService → guardrails output → telemetry → audit). |
 
 ### 6. `app/` — FastAPI Application
 
@@ -149,15 +143,12 @@ async def invoke(request, identity):
 
 Uses FastAPI `lifespan` for service initialization:
 1. Load environment config
-2. Create `Boto3SessionFactory`
-3. Initialize `CognitoAdapter` + JWT verifier
-4. Create `DynamoDBAdapter`
-5. Initialize all services (authorization, guardrails, memory, model gateway, etc.)
-6. Create `RuntimeOrchestrator`
-7. Create `AgentService`
-8. Create `BedrockKBManager`
-9. Wire all routers (`init_auth_router`, `init_session_router`, etc.)
-10. Mount Gradio UI at `/ui`
+2. Initialize `CognitoAdapter` + JWT verifier
+3. Create `DynamoDBAdapter`
+4. Initialize `AgentService`
+5. Create `BedrockKBManager`
+6. Wire all routers (`init_auth_router`, `init_session_router`, etc.)
+7. Mount Gradio UI at `/ui`
 
 ### 7. `ui/gradio_app.py` — Gradio Web Interface
 
@@ -168,12 +159,11 @@ Features:
 - **KB management**: Create Knowledge Bases (underwriter role only)
 - **Glassmorphism UI**: Premium design with gradient message bubbles
 
-### 8. `control_plane/` — Agent Registry & Deployment
+### 8. `control_plane/` — Agent Configuration & Deployment
 
 | File | Purpose |
 |------|---------|
-| `agent_registry.py` | Manages agent registrations (backed by DynamoDB) |
-| `execution_profile_repository.py` | Loads ExecutionProfiles from DynamoDB or local JSON |
+| `execution_profile_repository.py` | Loads ExecutionProfiles from DynamoDB or scans JSON files under `profiles/` |
 | `kb_manager.py` | KB provisioning for the bootstrap pipeline |
 | `memory_manager.py` | Memory provisioning for the bootstrap pipeline |
 | `deployment_manager.py` | Cloud deployment orchestration |

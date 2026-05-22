@@ -20,30 +20,31 @@ import argparse
 # Ensure project root is on path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from dotenv import load_dotenv
+# Reconfigure stdout/stderr to UTF-8 for Windows compatibility
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+
+from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv()
 
 
 async def invoke_agent(query: str, session_id: str, role: str) -> dict:
     """Invoke the underwriting agent directly."""
-    from domain.models import ExecutionProfile, ModelProfile, RetrievalProfile
+    import json
+    from domain.models import ExecutionProfile
     from agents.underwriting_agent import UnderwritingAgent
 
-    # Build profile from environment
-    kb_id = os.environ.get("BEDROCK_KB_ID", "")
-    model_id = os.environ.get("BEDROCK_MODEL_ID", "amazon.nova-pro-v1:0")
-    region = os.environ.get("AWS_REGION", "us-east-1")
+    # Load the production profile
+    with open("profiles/coaction-underwriting.json", "r", encoding="utf-8") as f:
+        profile_data = json.load(f)
 
-    profile = ExecutionProfile(
-        agent_id="coaction-underwriting",
-        version="1.0",
-        prompt_template_id="underwriting_system_v1",
-        model_profile=ModelProfile(model_id=model_id, temperature=0.0, max_tokens=4096),
-        retrieval_profile=RetrievalProfile(
-            knowledge_base_ids=[kb_id] if kb_id else [],
-        ),
-    )
+    profile = ExecutionProfile.model_validate(profile_data)
+
+    # Allow override from env if present
+    region = os.environ.get("AWS_REGION", "us-east-1")
+    if os.environ.get("BEDROCK_MODEL_ID"):
+        profile.model_profile.model_id = os.environ.get("BEDROCK_MODEL_ID")
 
     agent = UnderwritingAgent(profile=profile, region=region)
     result = await agent.invoke(query=query, role=role)
@@ -53,7 +54,7 @@ async def invoke_agent(query: str, session_id: str, role: str) -> dict:
         "sources": result.get("sources", []),
         "citations": result.get("citations", []),
         "follow_up_questions": result.get("follow_up_questions", []),
-        "model_id": model_id,
+        "model_id": profile.model_profile.model_id,
         "session_id": session_id,
     }
 
@@ -76,9 +77,18 @@ async def main():
     )
     args = parser.parse_args()
 
+    import json
+
     session_id = args.session_id or str(uuid.uuid4())
-    model_id = os.environ.get("BEDROCK_MODEL_ID", "amazon.nova-pro-v1:0")
-    kb_id = os.environ.get("BEDROCK_KB_ID", "")
+
+    with open("profiles/coaction-underwriting.json", "r", encoding="utf-8") as f:
+        profile_data = json.load(f)
+
+    model_id = os.environ.get("BEDROCK_MODEL_ID") or profile_data.get("model_profile", {}).get(
+        "model_id", "amazon.nova-pro-v1:0"
+    )
+    kb_ids = profile_data.get("retrieval_profile", {}).get("knowledge_base_ids", [])
+    kb_id = ", ".join(kb_ids) if kb_ids else "None"
 
     print(f"\n{'-' * 60}")
     print("  Coaction Binding Authority Bot - CLI")
